@@ -1,0 +1,47 @@
+[paths]
+# Path to the Lighthouse repository root.
+# Supports absolute paths, ~ expansion, or relative (resolved from this file's dir).
+lighthouse_dir = "~/path/to/lighthouse_dir"
+
+[lighthouse]
+# Network to profile (mainnet, gnosis, holesky, sepolia, etc.)
+network = "mainnet"
+# Checkpoint sync URL for bootstrapping state
+checkpoint_sync_url = "https://mainnet.checkpoint.sigp.io"
+# Extra flags passed to `lighthouse bn`
+extra_flags = ["--subscribe-all-subnets", "--import-all-attestations"]
+# Beacon API HTTP port (for epoch boundary detection)
+http_port = 5052
+# Prometheus metrics port
+metrics_port = 5054
+
+[profiling]
+# How long to run the profiled process (seconds)
+duration_seconds = 1800
+# perf sampling frequency (Hz). 1000 is sufficient for most analysis;
+# higher values produce larger perf.data files.
+perf_frequency = 1000
+# Cargo build profile: "release" (recommended) or "release-debug"
+# WARNING: release-debug produces much larger perf.data files and significantly
+# slower analysis. Not recommended for profiling runs over 10 minutes.
+profile = "release"
+# Disable backfill sync (recommended for profiling steady-state)
+disable_backfill = true
+# Base output directory for profile results
+output_dir = "./profiles"
+# Run nickname. If set, used as the subdirectory name instead of the commit hash.
+# Useful for labeling experiments (e.g. "bf4-perfield", "tracing-fix")
+nickname = ""
+
+[filtering]
+# Seconds before an epoch boundary to include in "epoch-boundary" filter
+epoch_boundary_warmup = 15
+# Seconds after an epoch boundary to include in "epoch-boundary" filter
+epoch_boundary_cooldown = 15
+# Safety timeout for epoch-boundary mode (max wait time in seconds)
+max_wait_seconds = 7200
+
+[mock_el]
+# Address for the mock execution layer
+listen_address = "127.0.0.1"
+listen_port = 8551

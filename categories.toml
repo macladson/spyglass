@@ -1,0 +1,84 @@
+# Lighthouse Profile Categories
+#
+# Categories are checked in order — first match wins.
+# A sample is assigned to a category if ANY frame in its call stack
+# contains one of the category's patterns (substring match).
+#
+# This measures "time spent in call paths involving X" — not just
+# direct CPU time in X. See the coverage report in analysis output
+# for uncategorized samples.
+#
+# Prefix a pattern with "re:" for regex matching (e.g. "re:milhouse.*tree_hash")
+
+[[categories]]
+name = "BLS/Crypto"
+patterns = [
+    "blst",
+    "__mulx_mont",
+    "__mulx_384",
+    "sub_mod_384",
+    "__subx_mod",
+    "__mulx_mont_383",
+    "__mulx_by_1",
+    "__add_mod_384",
+    "__sub_mod_384",
+    "add_mod_384",
+    "mul_382x",
+    "sqr_mont",
+    "miller_loop",
+    "PAIRING",
+    "final_exp",
+    "mul_fp6",
+    "sqr_fp4",
+    "mul_mont_384",
+    "__addx_mod_384",
+    "__redx_tail",
+    "sqr_382x",
+    "__lshift_mod_384",
+    "mul_by_1_plus_i",
+    "redc_mont",
+    "vec_is_zero",
+    "vec_select",
+]
+
+[[categories]]
+name = "Tracing/Logging"
+patterns = ["tracing", "logging"]
+
+[[categories]]
+name = "Fork Choice (locks)"
+# Matches fork_choice stacks where the leaf is in libc (futex/mutex wait)
+patterns = ["fork_choice"]
+leaf_patterns = ["[libc"]
+
+[[categories]]
+name = "Fork Choice (work)"
+patterns = ["fork_choice"]
+
+[[categories]]
+name = "Milhouse Iteration"
+patterns = ["milhouse::iter", "interface_iter"]
+
+[[categories]]
+name = "Milhouse Tree Hash"
+patterns = ["re:milhouse.*(tree_hash|packed_leaf.*tree_hash)"]
+
+[[categories]]
+name = "Milhouse Mutations"
+patterns = ["milhouse.*with_updated_leaves", "milhouse.*apply_updates", "re:milhouse.*update"]
+
+[[categories]]
+name = "Milhouse SSZ"
+patterns = ["re:milhouse.*(ssz|builder|from_ssz)"]
+
+[[categories]]
+name = "Networking/libp2p"
+patterns = ["libp2p", "gossipsub", "lighthouse_network"]
+
+[[categories]]
+name = "State Processing"
+patterns = ["state_processing", "per_epoch"]
+
+[[categories]]
+name = "Database"
+patterns = ["store", "leveldb"]
