@@ -20,15 +20,15 @@ def cmd_compare(config, dir_a: Path, dir_b: Path, filter_mode: str = "all"):
     dir_a = Path(dir_a).resolve()
     dir_b = Path(dir_b).resolve()
 
-    suffix = "" if filter_mode == "all" else f"_{filter_mode.replace('-', '_')}"
-    collapsed_a = dir_a / f"profile{suffix}.collapsed"
-    collapsed_b = dir_b / f"profile{suffix}.collapsed"
+    view_name = filter_mode.replace("-", "_")
+    collapsed_a = dir_a / "views" / view_name / "profile.collapsed"
+    collapsed_b = dir_b / "views" / view_name / "profile.collapsed"
 
     if not collapsed_a.exists():
-        print(f"ERROR: {collapsed_a} not found. Run `analyze` first.", file=sys.stderr)
+        print(f"ERROR: {collapsed_a} not found. Run `spyglass analyze {dir_a} --filter {filter_mode}` first.", file=sys.stderr)
         sys.exit(1)
     if not collapsed_b.exists():
-        print(f"ERROR: {collapsed_b} not found. Run `analyze` first.", file=sys.stderr)
+        print(f"ERROR: {collapsed_b} not found. Run `spyglass analyze {dir_b} --filter {filter_mode}` first.", file=sys.stderr)
         sys.exit(1)
 
     print(f"{BOLD}=== Compare ==={RESET}")
@@ -114,7 +114,9 @@ def cmd_compare(config, dir_a: Path, dir_b: Path, filter_mode: str = "all"):
 
     lines.append("")
 
-    output = dir_b / f"comparison{suffix}.md"
+    view_dir = dir_b / "views" / view_name
+    view_dir.mkdir(parents=True, exist_ok=True)
+    output = view_dir / "comparison.md"
     output.write_text("\n".join(lines))
     print(f"  {BOLD}Written:{RESET} {output}")
     print(f"\n{BOLD}=== Compare complete ==={RESET}\n")

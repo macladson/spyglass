@@ -1,4 +1,4 @@
-"""Progress indicators for long-running operations."""
+"""Progress display for profiling runs — ANSI multi-line block."""
 
 import os
 import re
@@ -11,169 +11,190 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .beacon_api import BeaconApiPoller
 
-from .constants import SLOTS_PER_EPOCH, SECONDS_PER_SLOT, BOLD, DIM, GREEN, BLUE, CYAN, RESET, format_size
+from .constants import SLOTS_PER_EPOCH, SECONDS_PER_SLOT, BOLD, DIM, GREEN, BLUE, CYAN, YELLOW, RESET, format_size
 
-BAR_WIDTH = 32  # One square per slot in an epoch
+BAR_WIDTH = 32
+
+# Profiling phases
+PHASE_SYNCING = "syncing"
+PHASE_SETTLING = "settling"
+PHASE_WAITING = "waiting"
+PHASE_PROFILING = "profiling"
+PHASE_DONE = "done"
 
 
-class ProgressTimer:
-    """Prints periodic status updates during a long-running operation.
-    
-    Usage:
-        with ProgressTimer("Building", interval=15):
-            subprocess.run(...)
-        
-        with ProgressTimer("Profiling", interval=10, beacon_poller=poller):
-            proc.wait()
-    """
+class RunProgress:
+    """Displays a live-updating multi-line progress block during profiling."""
 
     def __init__(
         self,
-        label: str,
-        interval: float = 15.0,
+        beacon_poller: "BeaconApiPoller",
         watch_file: Path | None = None,
-        beacon_poller: "BeaconApiPoller | None" = None,
-        total_duration: int | None = None,
+        start_slot_offset: int = 16,
+        end_slot_offset: int = 15,
+        epochs: int = 1,
     ):
-        self.label = label
-        self.interval = interval
-        self.watch_file = watch_file
         self.beacon_poller = beacon_poller
-        self.total_duration = total_duration
+        self.watch_file = watch_file
+        self.start_slot_offset = start_slot_offset
+        self.end_slot_offset = end_slot_offset
+        self.epochs = epochs
+        self.phase = PHASE_SYNCING
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._start_time: float = 0
+        self._lines_drawn = 0
 
-    def __enter__(self):
+    def start(self):
         self._start_time = time.time()
         self._thread = threading.Thread(target=self._tick_loop, daemon=True)
         self._thread.start()
-        return self
 
-    def __exit__(self, *exc):
+    def stop(self):
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
-        elapsed = time.time() - self._start_time
-        # Clear line and print final status
-        sys.stdout.write(f"\r\033[K  {self.label}... done ({_format_duration(elapsed)})\n")
-        sys.stdout.flush()
+        # Clear the block
+        self._clear()
+
+    def set_phase(self, phase: str):
+        self.phase = phase
 
     def _tick_loop(self):
         while not self._stop.is_set():
-            self._stop.wait(self.interval)
-            if self._stop.is_set():
-                break
-            self._print_status()
+            self._render()
+            self._stop.wait(1.0)
 
-    def _print_status(self):
+    def _clear(self):
+        """Erase the previously drawn block."""
+        if self._lines_drawn > 0:
+            sys.stdout.write(f"\033[{self._lines_drawn}A")
+            for _ in range(self._lines_drawn):
+                sys.stdout.write("\033[K\n")
+            sys.stdout.write(f"\033[{self._lines_drawn}A")
+            sys.stdout.flush()
+            self._lines_drawn = 0
+
+    def _render(self):
+        """Render the progress block."""
         elapsed = time.time() - self._start_time
-        term_width = _get_terminal_width()
+        width = _get_terminal_width()
+        bp = self.beacon_poller
 
-        # Left side: label + elapsed + file size
-        left_parts = [f"  {BOLD}{self.label}{RESET} {DIM}[{_format_duration(elapsed)}]{RESET}"]
+        # Build display data
+        slot = bp.state.last_slot
+        epoch = slot // SLOTS_PER_EPOCH if slot is not None else None
+        slot_in_epoch = slot % SLOTS_PER_EPOCH if slot is not None else None
 
+        phase_str = {
+            PHASE_SYNCING: f"{YELLOW}●{RESET} {BOLD}Syncing{RESET}",
+            PHASE_SETTLING: f"{YELLOW}●{RESET} {BOLD}Settling{RESET}",
+            PHASE_WAITING: f"{CYAN}●{RESET} {BOLD}Waiting{RESET}",
+            PHASE_PROFILING: f"{GREEN}●{RESET} {BOLD}Profiling{RESET}",
+            PHASE_DONE: f"{GREEN}✓{RESET} {BOLD}Done{RESET}",
+        }.get(self.phase, self.phase)
+
+        # Line 1: phase + elapsed + epoch info
+        line1_parts = [f"  {phase_str}"]
+        if epoch is not None:
+            line1_parts.append(f"{DIM}epoch {epoch}{RESET}")
+        line1_parts.append(f"{DIM}{_format_duration(elapsed)}{RESET}")
+        line1 = "  ".join(line1_parts)
+
+        # Line 2: progress bar
+        bar, bar_info = self._build_bar(slot_in_epoch)
+        if bar:
+            line2 = f"  {bar}  {bar_info}"
+        else:
+            line2 = f"  {DIM}waiting for head slot...{RESET}"
+
+        # Line 3: details
+        details = []
         if self.watch_file and self.watch_file.exists():
             size = self.watch_file.stat().st_size
-            left_parts.append(f"{DIM}{format_size(size)}{RESET}")
+            if size > 0:
+                details.append(f"perf.data: {format_size(size)}")
+        if bp.target_reached.is_set():
+            details.append(f"epochs: {len(bp.state.epoch_boundaries)}/{self.epochs} ✓")
+        elif len(bp.state.epoch_boundaries) > 0:
+            details.append(f"epochs: {len(bp.state.epoch_boundaries)}/{self.epochs}")
+        if bp._genesis_time and slot is not None:
+            details.append(f"freq: {self._get_freq_display()}")
+        line3 = f"  {DIM}{' · '.join(details)}{RESET}" if details else ""
 
-        # Additional context from beacon poller
-        if self.beacon_poller:
-            ctx = self._get_context()
-            if ctx:
-                left_parts.append(f"{CYAN}{ctx}{RESET}")
+        # Compose and draw
+        lines = [line1, line2]
+        if line3:
+            lines.append(line3)
 
-        left = " ".join(left_parts)
-        # Strip ANSI for length calculation
-        left_visible_len = len(_strip_ansi(left))
-
-        # Right side: progress bar
-        bar = self._get_bar(elapsed)
-        bar_visible_len = len(_strip_ansi(bar)) if bar else 0
-
-        # Compose line with gap between left and right-aligned bar
-        if bar:
-            gap = term_width - left_visible_len - bar_visible_len - 1
-            if gap < 2:
-                gap = 2
-            line = f"\r{left}{' ' * gap}{bar}"
-        else:
-            line = f"\r{left}"
-
-        # Clear to end of line, then write
-        sys.stdout.write(f"{line}\033[K")
+        self._clear()
+        output = "\n".join(lines) + "\n"
+        sys.stdout.write(output)
         sys.stdout.flush()
+        self._lines_drawn = len(lines)
 
-    def _get_bar(self, elapsed: float) -> str:
-        """Build the 32-square progress bar."""
-        if self.beacon_poller and self.beacon_poller.state.last_slot is not None:
-            # Don't show slot bar until sync is complete and slots are advancing
-            # normally (single-slot increments = live, not catching up)
-            if self.beacon_poller.state.sync_complete_time is None:
-                return ""
-            if not self.beacon_poller._is_tracking_live:
-                return ""
+    def _build_bar(self, slot_in_epoch: int | None) -> tuple[str, str]:
+        """Build the progress bar and info text for the current phase."""
+        if slot_in_epoch is None:
+            return "", ""
 
-            slot = self.beacon_poller.state.last_slot
-            epochs_done = self.beacon_poller._completed_epochs
-            epochs_detected = len(self.beacon_poller.state.epoch_boundaries)
-            target = self.beacon_poller.target_epochs
+        bp = self.beacon_poller
 
-            slot_in_epoch = slot % SLOTS_PER_EPOCH
-
-            # If a boundary was detected but cooldown hasn't finished,
-            # keep the bar full — but only on the final epoch
-            if epochs_detected > epochs_done and epochs_detected >= (target or 1):
-                bar = _render_bar(BAR_WIDTH, BAR_WIDTH)
-                label = f"{DIM}cooldown...{RESET}"
-                if target:
-                    return f"{bar} {BLUE}[{epochs_detected}/{target}]{RESET} {label}"
-                return f"{bar} {label}"
-
-            # Show epochs_detected for responsive feedback
-            display_count = epochs_detected
-            remaining_secs = (SLOTS_PER_EPOCH - slot_in_epoch) * SECONDS_PER_SLOT
-            eta = _format_duration(remaining_secs)
-            bar = _render_bar(slot_in_epoch, BAR_WIDTH)
-            if target:
-                return f"{bar} {DIM}{slot_in_epoch}/{BAR_WIDTH}{RESET} {BLUE}[{display_count}/{target}]{RESET} {DIM}~{eta}{RESET}"
+        if self.phase == PHASE_PROFILING:
+            mid = self.start_slot_offset
+            if bp.target_reached.is_set():
+                # Post-boundary: counting to end_slot
+                target = self.end_slot_offset
+                if slot_in_epoch >= target:
+                    bar = _render_bar(BAR_WIDTH, BAR_WIDTH, midpoint=mid)
+                    return bar, f"{DIM}slot {slot_in_epoch}/32 · finishing...{RESET}"
+                remaining = (target - slot_in_epoch) * SECONDS_PER_SLOT
+                bar = _render_bar(slot_in_epoch, BAR_WIDTH, midpoint=mid)
+                return bar, f"slot {slot_in_epoch}/32  {DIM}~{_format_duration(remaining)} remaining{RESET}"
             else:
-                return f"{bar} {DIM}{slot_in_epoch}/{BAR_WIDTH} ~{eta}{RESET}"
-        elif self.total_duration:
-            # Time-based: fill proportional to elapsed/total
-            progress = min(elapsed / self.total_duration, 1.0)
-            filled = int(progress * BAR_WIDTH)
-            remaining = self.total_duration - elapsed
-            eta = _format_duration(max(0, remaining))
-            bar = _render_bar(filled, BAR_WIDTH)
-            return f"{bar} {DIM}~{eta}{RESET}"
+                # Pre-boundary: counting to epoch boundary
+                remaining = (SLOTS_PER_EPOCH - slot_in_epoch) * SECONDS_PER_SLOT
+                bar = _render_bar(slot_in_epoch, BAR_WIDTH, midpoint=mid)
+                return bar, f"slot {slot_in_epoch}/32  {DIM}~{_format_duration(remaining)} to boundary{RESET}"
 
-        return ""
+        elif self.phase == PHASE_WAITING:
+            target = self.start_slot_offset
+            filled = min(slot_in_epoch, target)
+            bar = _render_bar(filled, target)
+            remaining = (target - slot_in_epoch) * SECONDS_PER_SLOT if slot_in_epoch < target else 0
+            return bar, f"slot {slot_in_epoch} → {target}  {DIM}~{_format_duration(remaining)}{RESET}"
 
-    def _get_context(self) -> str | None:
-        """Get additional context from the beacon poller."""
-        if not self.beacon_poller:
-            return None
-        slot = self.beacon_poller.state.last_slot
-        if slot is None:
-            return "(syncing...)"
-        epoch = slot // SLOTS_PER_EPOCH
-        return f"epoch {epoch}"
+        elif self.phase in (PHASE_SETTLING, PHASE_SYNCING):
+            if not bp._is_tracking_live:
+                return "", ""
+            bar = _render_bar(slot_in_epoch, BAR_WIDTH)
+            return bar, f"{DIM}slot {slot_in_epoch}/32{RESET}"
+
+        return "", ""
+
+    def _get_freq_display(self) -> str:
+        """Show effective sampling info."""
+        return "1000 Hz"
 
 
-def _render_bar(filled: int, total: int) -> str:
-    """Render a colored progress bar: ████████░░░░░░░░"""
+def _render_bar(filled: int, total: int, midpoint: int | None = None) -> str:
+    """Render a progress bar with optional midpoint marker."""
     filled = max(0, min(filled, total))
-    return f"{GREEN}{'█' * filled}{RESET}{DIM}{'░' * (total - filled)}{RESET}"
-
-
-def _strip_ansi(text: str) -> str:
-    """Remove ANSI escape sequences for length calculation."""
-    return re.sub(r"\033\[[0-9;]*m", "", text)
+    chars = []
+    for i in range(total):
+        if i == midpoint:
+            if i < filled:
+                chars.append(f"{CYAN}┃{RESET}")
+            else:
+                chars.append(f"{DIM}┃{RESET}")
+        elif i < filled:
+            chars.append(f"{GREEN}━{RESET}")
+        else:
+            chars.append(f"{DIM}─{RESET}")
+    return "".join(chars)
 
 
 def _get_terminal_width() -> int:
-    """Get the terminal width, defaulting to 80."""
     try:
         return os.get_terminal_size().columns
     except (OSError, ValueError):
@@ -181,7 +202,6 @@ def _get_terminal_width() -> int:
 
 
 def _format_duration(seconds: float) -> str:
-    """Format seconds as M:SS or H:MM:SS."""
     total = int(seconds)
     if total < 3600:
         return f"{total // 60}:{total % 60:02d}"
@@ -189,6 +209,3 @@ def _format_duration(seconds: float) -> str:
     m = (total % 3600) // 60
     s = total % 60
     return f"{h}:{m:02d}:{s:02d}"
-
-
-

@@ -10,7 +10,6 @@ from .config import SpyglassConfig
 from .categories import load_categories, categorize_collapsed, format_category_report
 from .constants import BOLD, RESET
 from .filters import compute_time_ranges, filter_collapsed_stacks
-from .progress import ProgressTimer
 
 
 def collapse_perf_data(perf_data: Path, collapsed_path: Path):
@@ -41,11 +40,9 @@ def collapse_perf_data(perf_data: Path, collapsed_path: Path):
         # Allow perf_proc to receive SIGPIPE if collapse_proc exits early
         perf_proc.stdout.close()
 
-        with ProgressTimer("Collapsing stacks", interval=15, watch_file=collapsed_path):
-            # Read stderr before wait() to prevent deadlock on large error output
-            collapse_stderr = collapse_proc.stderr.read()
-            collapse_proc.wait()
-            perf_proc.wait()
+        collapse_stderr = collapse_proc.stderr.read()
+        collapse_proc.wait()
+        perf_proc.wait()
     finally:
         out.close()
 
@@ -180,8 +177,6 @@ def cmd_analyze(
         config: Spyglass configuration object
         profile_dir: Directory containing profiling output
         filter_mode: "all", "epoch-boundary", "mid-epoch", or "steady-state".
-                     If "all" and run.json exists, defaults to the filter
-                     used during the run.
         verbose: Show tool output
     """
     profile_dir = Path(profile_dir).resolve()
@@ -190,21 +185,14 @@ def cmd_analyze(
         print(f"ERROR: Directory not found: {profile_dir}", file=sys.stderr)
         sys.exit(1)
 
-    # Default filter from run metadata if not explicitly set
-    if filter_mode == "all":
-        run_json_path = profile_dir / "run.json"
-        if run_json_path.exists():
-            import json
-            run_info = json.loads(run_json_path.read_text())
-            saved_filter = run_info.get("filter_mode", "all")
-            if saved_filter != "all":
-                filter_mode = saved_filter
-                print(f"  (using filter '{filter_mode}' from run.json)")
-
     perf_data = profile_dir / "perf.data"
     heap_files = list(profile_dir.glob("heap*.heap"))
 
     if perf_data.exists():
+        if filter_mode is None:
+            print("ERROR: --filter is required for CPU profiles.", file=sys.stderr)
+            print(f"  Try: spyglass analyze {profile_dir} --filter epoch-boundary", file=sys.stderr)
+            sys.exit(1)
         _analyze_cpu(config, profile_dir, perf_data, filter_mode)
     elif heap_files:
         _analyze_memory(config, profile_dir, heap_files)
@@ -229,19 +217,22 @@ def _analyze_cpu(config: SpyglassConfig, profile_dir: Path, perf_data: Path, fil
     # Step 2: Apply time-based filtering if needed
     if filter_mode == "all":
         collapsed_path = collapsed_full
-        suffix = ""
+        view_dir = profile_dir / "views" / "all"
+        view_dir.mkdir(parents=True, exist_ok=True)
     else:
         warmup = config.filtering.epoch_boundary_warmup
         cooldown = config.filtering.epoch_boundary_cooldown
         time_ranges = compute_time_ranges(profile_dir, filter_mode, warmup, cooldown)
 
         if time_ranges is None:
-            print("  No filtering applied (missing data or 'all' mode)")
-            collapsed_path = collapsed_full
-            suffix = ""
+            print(f"ERROR: No data available for '{filter_mode}' filter.", file=sys.stderr)
+            print(f"  This usually means no epoch boundaries were recorded during the run.", file=sys.stderr)
+            print(f"  Try: spyglass analyze {profile_dir} --filter all", file=sys.stderr)
+            sys.exit(1)
         else:
-            suffix = f"_{filter_mode.replace('-', '_')}"
-            collapsed_path = profile_dir / f"profile{suffix}.collapsed"
+            view_dir = profile_dir / "views" / filter_mode.replace("-", "_")
+            view_dir.mkdir(parents=True, exist_ok=True)
+            collapsed_path = view_dir / "profile.collapsed"
             print(f"  Filtering to {filter_mode} time ranges...")
             filter_collapsed_stacks(
                 collapsed_full, collapsed_path, time_ranges, perf_data
@@ -249,11 +240,7 @@ def _analyze_cpu(config: SpyglassConfig, profile_dir: Path, perf_data: Path, fil
             size_kb = collapsed_path.stat().st_size / 1024
             print(f"    -> {collapsed_path.name} ({size_kb:.0f} KB)")
 
-    # Step 3: Flamegraph
-    svg_path = profile_dir / f"flamegraph{suffix}.svg"
-    generate_flamegraph(collapsed_path, svg_path)
-
-    # Step 4: Analysis markdown
+    # Step 3: Analysis markdown
     print("  Analyzing stacks...")
     analysis = analyze_collapsed(collapsed_path)
 
@@ -265,7 +252,7 @@ def _analyze_cpu(config: SpyglassConfig, profile_dir: Path, perf_data: Path, fil
         cat_result = categorize_collapsed(collapsed_path, categories)
         category_report = format_category_report(cat_result, categories)
 
-    md_path = profile_dir / f"analysis{suffix}.md"
+    md_path = view_dir / "analysis.md"
     write_analysis_md(
         analysis, md_path,
         title=f"CPU Profile Analysis ({filter_mode})",
@@ -273,8 +260,7 @@ def _analyze_cpu(config: SpyglassConfig, profile_dir: Path, perf_data: Path, fil
     )
 
     print(f"\n{BOLD}=== Analysis complete ==={RESET}")
-    print(f"  {BOLD}Flamegraph:{RESET} {svg_path}")
-    print(f"  {BOLD}Analysis:{RESET}   {md_path}")
+    print(f"  {BOLD}Analysis:{RESET} {md_path}")
     print()
 
 

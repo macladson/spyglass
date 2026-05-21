@@ -10,6 +10,8 @@ from .build import cmd_build
 from .run import cmd_run
 from .analyze import cmd_analyze
 from .compare import cmd_compare
+from .export import cmd_export
+from .flamechart import cmd_flamechart
 from .clean import cmd_clean
 
 
@@ -48,12 +50,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         parents=[parent_parser],
         epilog="""\nExamples:
-  %(prog)s profile --mode cpu --filter epoch-boundary -n my-test
-  %(prog)s profile --mode cpu --filter epoch-boundary --pr 6789
+  %(prog)s profile --mode cpu -n my-test
+  %(prog)s profile --mode cpu --pr 6789
   %(prog)s build --mode cpu
-  %(prog)s run --mode cpu --filter epoch-boundary -n my-test
-  %(prog)s analyze ./profiles/my-test/cpu/epoch_boundary
-  %(prog)s compare ./profiles/baseline/cpu/epoch_boundary ./profiles/opt/cpu/epoch_boundary
+  %(prog)s run --mode cpu -n my-test
+  %(prog)s analyze ./profiles/my-test/cpu --filter epoch-boundary
+  %(prog)s export ./profiles/my-test/cpu perf-script --filter epoch-boundary
+  %(prog)s compare ./profiles/baseline/cpu ./profiles/opt/cpu --filter epoch-boundary
   %(prog)s clean
 """,
     )
@@ -72,66 +75,67 @@ def main():
 
     # --- run ---
     run_parser = subparsers.add_parser("run", help="Run Lighthouse under a profiler", parents=[parent_parser])
-    run_parser.add_argument(
-        "--mode", "-m",
-        choices=["cpu", "memory"],
-        required=True,
-        help="Profiling mode",
-    )
-    run_parser.add_argument(
-        "--output-dir", "-o",
-        type=str,
-        default=None,
-        help="Base output directory (default: from config, path auto-constructed)",
-    )
-    run_parser.add_argument(
-        "--filter", "-f",
-        choices=["all", "epoch-boundary", "mid-epoch", "steady-state"],
-        default="all",
-        help="Profiling filter (default: all)",
-    )
-    run_parser.add_argument(
-        "--duration", "-d",
-        type=int,
-        default=None,
-        help="Duration in seconds (overrides config; not used for epoch-boundary)",
-    )
-    run_parser.add_argument(
-        "--runs", "-r",
-        type=int,
-        default=1,
-        help="Number of epochs to capture (only for --filter epoch-boundary, default: 1)",
-    )
-    run_parser.add_argument(
-        "--force",
-        action="store_true",
-        default=False,
-        help="Overwrite existing output directory",
-    )
+    run_parser.add_argument("--mode", "-m", choices=["cpu", "memory"], required=True, help="Profiling mode")
+    run_parser.add_argument("--output-dir", "-o", type=str, default=None, help="Base output directory")
+    run_parser.add_argument("--duration", "-d", type=int, default=None, help="Duration in seconds (safety timeout)")
+    run_parser.add_argument("--epochs", "-e", type=int, default=1, help="Number of epochs to capture (default: 1)")
+    run_parser.add_argument("--force", action="store_true", default=False, help="Overwrite existing output directory")
 
     # --- analyze ---
     analyze_parser = subparsers.add_parser("analyze", help="Analyze profiling output", parents=[parent_parser])
-    analyze_parser.add_argument(
-        "directory",
-        type=Path,
-        help="Profile output directory to analyze",
-    )
-    analyze_parser.add_argument(
-        "--filter", "-f",
-        choices=["all", "epoch-boundary", "mid-epoch", "steady-state"],
-        default="all",
-        help="Time-based filter for samples (default: all)",
-    )
+    analyze_parser.add_argument("directory", type=Path, help="Profile capture directory")
+    analyze_parser.add_argument("--filter", "-f", choices=["all", "epoch-boundary", "mid-epoch", "steady-state"], default=None, help="Time-based filter for samples (required for CPU profiles)")
 
     # --- compare ---
     compare_parser = subparsers.add_parser("compare", help="Compare two profile runs", parents=[parent_parser])
     compare_parser.add_argument("dir_a", type=Path, help="Baseline profile directory")
     compare_parser.add_argument("dir_b", type=Path, help="Comparison profile directory")
-    compare_parser.add_argument(
-        "--filter", "-f",
-        choices=["all", "epoch-boundary", "mid-epoch", "steady-state"],
-        default="all",
-        help="Which filtered profile to compare (default: all)",
+    compare_parser.add_argument("--filter", "-f", choices=["all", "epoch-boundary", "mid-epoch", "steady-state"], required=True, help="Which filtered view to compare")
+
+    # --- flamechart ---
+    flamechart_parser = subparsers.add_parser(
+        "flamechart", help="Generate interactive flame chart HTML", parents=[parent_parser]
+    )
+    flamechart_parser.add_argument(
+        "directory",
+        type=Path,
+        help="Profile output directory to visualize",
+    )
+    flamechart_parser.add_argument(
+        "--bin-size", "-b",
+        type=float,
+        default=0.5,
+        help="Time bin width in seconds (default: 0.5)",
+    )
+
+    # --- export ---
+    export_parser = subparsers.add_parser(
+        "export", help="Export profile in various formats", parents=[parent_parser]
+    )
+    export_parser.add_argument(
+        "directory",
+        type=Path,
+        help="Profile output directory containing perf.data",
+    )
+    export_parser.add_argument(
+        "format",
+        nargs="?",
+        choices=["perf-script", "flamegraph", "flamechart"],
+        default="perf-script",
+        help="Export format (default: perf-script)",
+    )
+    export_parser.add_argument(
+        "--output", "-o",
+        type=Path,
+        default=None,
+        help="Output file path (default: auto-generated)",
+    )
+    export_parser.add_argument("--filter", "-f", choices=["all", "epoch-boundary", "mid-epoch", "steady-state"], required=True, help="Time filter to apply")
+    export_parser.add_argument(
+        "--bin-size", "-b",
+        type=float,
+        default=0.5,
+        help="Bin size for flamechart format (default: 0.5s)",
     )
 
     # --- clean ---
@@ -145,45 +149,12 @@ def main():
     )
 
     # --- profile (convenience) ---
-    profile_parser = subparsers.add_parser(
-        "profile", help="Build + run + analyze in one step", parents=[parent_parser]
-    )
-    profile_parser.add_argument(
-        "--mode", "-m",
-        choices=["cpu", "memory"],
-        required=True,
-        help="Profiling mode",
-    )
-    profile_parser.add_argument(
-        "--output-dir", "-o",
-        type=str,
-        default=None,
-        help="Base output directory (default: from config, path auto-constructed)",
-    )
-    profile_parser.add_argument(
-        "--filter", "-f",
-        choices=["all", "epoch-boundary", "mid-epoch", "steady-state"],
-        default="all",
-        help="Profiling filter (default: all)",
-    )
-    profile_parser.add_argument(
-        "--duration", "-d",
-        type=int,
-        default=None,
-        help="Duration in seconds (overrides config; not used for epoch-boundary)",
-    )
-    profile_parser.add_argument(
-        "--runs", "-r",
-        type=int,
-        default=1,
-        help="Number of epochs to capture (only for --filter epoch-boundary, default: 1)",
-    )
-    profile_parser.add_argument(
-        "--force",
-        action="store_true",
-        default=False,
-        help="Overwrite existing output directory",
-    )
+    profile_parser = subparsers.add_parser("profile", help="Build + run in one step", parents=[parent_parser])
+    profile_parser.add_argument("--mode", "-m", choices=["cpu", "memory"], required=True, help="Profiling mode")
+    profile_parser.add_argument("--output-dir", "-o", type=str, default=None, help="Base output directory")
+    profile_parser.add_argument("--duration", "-d", type=int, default=None, help="Duration in seconds (safety timeout)")
+    profile_parser.add_argument("--epochs", "-e", type=int, default=1, help="Number of epochs to capture (default: 1)")
+    profile_parser.add_argument("--force", action="store_true", default=False, help="Overwrite existing output directory")
 
     args = parser.parse_args()
 
@@ -211,16 +182,15 @@ def main():
 
     elif args.command == "run":
         output_path = resolve_output_path(
-            config, args.mode, args.filter,
+            config, args.mode,
             output_dir_override=args.output_dir,
             nickname_override=args.nickname,
         )
         cmd_run(
             config, args.mode, output_path,
             verbose=verbose,
-            filter_mode=args.filter,
             duration_override=args.duration,
-            runs=args.runs,
+            epochs=args.epochs,
             force=args.force,
         )
 
@@ -232,7 +202,7 @@ def main():
 
     elif args.command == "profile":
         output_path = resolve_output_path(
-            config, args.mode, args.filter,
+            config, args.mode,
             output_dir_override=args.output_dir,
             nickname_override=args.nickname,
         )
@@ -240,12 +210,23 @@ def main():
         cmd_run(
             config, args.mode, output_path,
             verbose=verbose,
-            filter_mode=args.filter,
             duration_override=args.duration,
-            runs=args.runs,
+            epochs=args.epochs,
             force=args.force,
         )
-        cmd_analyze(config, output_path, filter_mode=args.filter, verbose=verbose)
+
+    elif args.command == "flamechart":
+        cmd_flamechart(config, args.directory, bin_size=args.bin_size, verbose=verbose)
+
+    elif args.command == "export":
+        cmd_export(
+            config, args.directory,
+            format=args.format,
+            output_file=args.output,
+            filter_mode=args.filter,
+            bin_size=args.bin_size,
+            verbose=verbose,
+        )
 
     elif args.command == "clean":
         cmd_clean(config, what=args.what, verbose=verbose)

@@ -26,20 +26,10 @@ def cmd_build(config: SpyglassConfig, mode: str, verbose: bool = False):
     lighthouse_dir = config.paths.lighthouse_dir
     profile = config.profiling.profile
     do_disable_backfill = config.profiling.disable_backfill
-    duration_secs = config.profiling.duration_seconds
 
     if not lighthouse_dir.exists():
         print(f"ERROR: Lighthouse directory not found: {lighthouse_dir}", file=sys.stderr)
         sys.exit(1)
-
-    # Warn about release-debug with long durations
-    if "debug" in profile and duration_secs > 600:
-        print(
-            "WARNING: debug profile with duration > 10 minutes will produce\n"
-            "  very large perf.data files and slow analysis. Consider using 'release'\n"
-            "  profile or reducing duration.\n",
-            file=sys.stderr,
-        )
 
     print(f"{BOLD}=== Build ==={RESET}")
     print(f"  {BOLD}Mode:{RESET}             {mode}")

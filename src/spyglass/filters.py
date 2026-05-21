@@ -27,11 +27,26 @@ def load_epochs(output_dir: Path) -> list[dict]:
 
 
 def load_sync_status(output_dir: Path) -> dict:
-    """Load sync status from sync_status.json."""
+    """Load sync/timing status from run.json (or legacy sync_status.json).
+    
+    Returns dict with keys: sync_complete_time, recording_start_time, genesis_time.
+    """
+    result = {}
+    # Legacy: sync_status.json
     sync_file = output_dir / "sync_status.json"
-    if not sync_file.exists():
-        return {}
-    return json.loads(sync_file.read_text())
+    if sync_file.exists():
+        result = json.loads(sync_file.read_text())
+    # Primary: run.json (overrides legacy values where present)
+    run_file = output_dir / "run.json"
+    if run_file.exists():
+        data = json.loads(run_file.read_text())
+        if data.get("sync_complete_time") is not None:
+            result["sync_complete_time"] = data["sync_complete_time"]
+        if data.get("recording_start") is not None:
+            result["recording_start_time"] = data["recording_start"]
+        if data.get("genesis_time") is not None:
+            result["genesis_time"] = data["genesis_time"]
+    return result
 
 
 def _load_clock_offset(output_dir: Path) -> float | None:

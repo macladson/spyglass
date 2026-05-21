@@ -55,7 +55,6 @@ class BeaconApiPoller:
 
     Writes results to an output directory as JSON files:
       - epochs.json: list of observed epoch boundaries with computed timestamps
-      - sync_status.json: genesis time, when sync completed
       - metrics/: pre/post/delta metric snapshots
     """
 
@@ -386,16 +385,6 @@ class BeaconApiPoller:
         ]
         epochs_file = self.output_dir / "epochs.json"
         epochs_file.write_text(json.dumps(epochs_data, indent=2))
-
-        # Write sync status
-        sync_data = {
-            "genesis_time": self._genesis_time,
-            "sync_complete_time": self.state.sync_complete_time,
-            "recording_start_time": self.state.recording_start_time,
-            "epochs_observed": len(self.state.epoch_boundaries),
-        }
-        sync_file = self.output_dir / "sync_status.json"
-        sync_file.write_text(json.dumps(sync_data, indent=2))
 
 
 def _parse_prometheus_text(text: str) -> dict[str, float]:

@@ -14,8 +14,8 @@ from pathlib import Path
 
 from .config import SpyglassConfig, get_lighthouse_commit_hash
 from .beacon_api import BeaconApiPoller
-from .constants import BOLD, RESET
-from .progress import ProgressTimer
+from .constants import SLOTS_PER_EPOCH, SECONDS_PER_SLOT, BOLD, RESET
+from .progress import RunProgress, PHASE_SYNCING, PHASE_SETTLING, PHASE_WAITING, PHASE_PROFILING, PHASE_DONE
 
 
 def _check_required_tools(mode: str):
@@ -51,13 +51,7 @@ def generate_jwt(path: Path):
 
 
 def _acquire_lock(lock_path: Path):
-    """Acquire an exclusive lock file to prevent concurrent runs.
-
-    Uses fcntl.flock() for advisory locking. The lock is automatically
-    released by the kernel if the process crashes or is killed.
-
-    Returns the open file handle (must be kept alive for the lock duration).
-    """
+    """Acquire an exclusive lock file to prevent concurrent runs."""
     lock_file = open(lock_path, "w")
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -70,7 +64,6 @@ def _acquire_lock(lock_path: Path):
         print(f"  Lock file: {lock_path}", file=sys.stderr)
         print(f"  If no other process is running, remove the lock file and retry.", file=sys.stderr)
         sys.exit(1)
-    # Write PID for debugging purposes
     lock_file.write(str(os.getpid()))
     lock_file.flush()
     return lock_file
@@ -96,26 +89,25 @@ def cmd_run(
     mode: str,
     output_dir: Path,
     verbose: bool = False,
-    filter_mode: str = "all",
     duration_override: int | None = None,
-    runs: int = 1,
+    epochs: int = 1,
     force: bool = False,
 ):
     """Run Lighthouse under profiling.
+
+    Starts lighthouse directly (no perf wrapper), waits for sync + settle,
+    then attaches perf at the start slot for precise profiling unit capture.
 
     Args:
         config: Spyglass configuration object
         mode: "cpu" or "memory"
         output_dir: Directory for profiling output
         verbose: Show lighthouse/mock-el output
-        filter_mode: "all", "steady-state", "mid-epoch", or "epoch-boundary"
-        duration_override: Override duration_seconds from config
-        runs: Number of epochs to capture (only for epoch-boundary mode)
+        duration_override: Safety timeout in seconds
+        epochs: Number of epochs to capture
     """
     output_dir = output_dir.resolve()
     lighthouse_dir = config.paths.lighthouse_dir
-    duration = duration_override or config.profiling.duration_seconds
-    max_wait = config.filtering.max_wait_seconds
     perf_freq = config.profiling.perf_frequency
     sync_url = config.lighthouse.checkpoint_sync_url
     network = config.lighthouse.network
@@ -125,9 +117,10 @@ def cmd_run(
     http_port = config.lighthouse.http_port
     metrics_port = config.lighthouse.metrics_port
 
-    # For epoch-boundary mode, use safety timeout instead of fixed duration
-    is_event_based = filter_mode == "epoch-boundary"
-    effective_timeout = max_wait if is_event_based else duration
+    effective_timeout = duration_override or 7200
+
+    start_slot = config.profiling.start_slot
+    end_slot = config.profiling.end_slot
 
     lighthouse_bin = config.lighthouse_binary
     lcli_bin = config.lcli_binary
@@ -145,11 +138,7 @@ def cmd_run(
     print(f"{BOLD}=== Run ==={RESET}")
     print(f"  {BOLD}Mode:{RESET}     {mode}")
     print(f"  {BOLD}Network:{RESET}  {network}")
-    print(f"  {BOLD}Filter:{RESET}   {filter_mode}")
-    if is_event_based:
-        print(f"  {BOLD}Target:{RESET}   {runs} epoch(s) (safety timeout: {max_wait}s)")
-    else:
-        print(f"  {BOLD}Duration:{RESET} {duration}s")
+    print(f"  {BOLD}Target:{RESET}   {epochs} epoch(s) (timeout: {effective_timeout}s)")
     print(f"  {BOLD}Output:{RESET}   {output_dir}")
     print(f"  {BOLD}Binary:{RESET}   {lighthouse_bin}")
     print()
@@ -160,16 +149,16 @@ def cmd_run(
             print(f"ERROR: Output directory already exists and is not empty: {output_dir}", file=sys.stderr)
             print(f"  Use --force to overwrite.", file=sys.stderr)
             sys.exit(1)
-        # Clean out all existing contents
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Acquire lock file to prevent concurrent runs on same output directory
     lock_path = output_dir / ".spyglass.lock"
     lock_file = _acquire_lock(lock_path)
 
-    # Generate JWT
-    jwt_path = output_dir / "jwt.hex"
+    datadir = output_dir / "datadir"
+    datadir.mkdir(parents=True, exist_ok=True)
+
+    jwt_path = datadir / "jwt.hex"
     generate_jwt(jwt_path)
 
     # Start mock-el
@@ -185,32 +174,39 @@ def cmd_run(
     print(f"  Starting mock-el on {mel_addr}:{mel_port}...")
 
     devnull = None if verbose else subprocess.DEVNULL
-    mock_el_proc = subprocess.Popen(
-        mock_el_cmd, stdout=devnull, stderr=devnull,
-    )
+    mock_el_proc = subprocess.Popen(mock_el_cmd, stdout=devnull, stderr=devnull)
 
-    # Process tracking for signal cleanup
-    main_proc = None
+    # Process tracking
+    lighthouse_proc = None
+    perf_proc = None
     beacon_poller = None
+    progress = None
     _cleanup_done = False
     _signal_received = False
 
     def cleanup(signum=None, frame=None):
-        """Graceful shutdown of all child processes."""
         nonlocal _cleanup_done, _signal_received
         if _cleanup_done:
             return
         _cleanup_done = True
         if signum:
             _signal_received = True
+        if progress:
+            progress.stop()
         if beacon_poller:
             beacon_poller.stop()
-        if main_proc and main_proc.poll() is None:
-            main_proc.terminate()
+        if perf_proc and perf_proc.poll() is None:
+            perf_proc.send_signal(signal.SIGINT)
             try:
-                main_proc.wait(timeout=5)
+                perf_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                main_proc.kill()
+                perf_proc.kill()
+        if lighthouse_proc and lighthouse_proc.poll() is None:
+            lighthouse_proc.terminate()
+            try:
+                lighthouse_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                lighthouse_proc.kill()
         if mock_el_proc.poll() is None:
             mock_el_proc.terminate()
             try:
@@ -231,11 +227,7 @@ def cmd_run(
             sys.exit(1)
         print("  mock-el ready.")
 
-        # Create datadir
-        datadir = output_dir / "datadir"
-        datadir.mkdir(parents=True, exist_ok=True)
-
-        # Build lighthouse command
+        # Build lighthouse command (no perf wrapper)
         execution_endpoint = f"http://{mel_addr}:{mel_port}"
         bn_args = [
             str(lighthouse_bin), "bn",
@@ -252,35 +244,24 @@ def cmd_run(
         ]
         bn_args.extend(flags)
 
-        # Build the full run command based on mode
+        # Environment for memory profiling
         env = os.environ.copy()
-        perf_data = None
-        if mode == "cpu":
-            perf_data = output_dir / "perf.data"
-            run_cmd = [
-                "timeout", str(effective_timeout),
-                "perf", "record", "-g",
-                "-F", str(perf_freq),
-                "-o", str(perf_data),
-                "--",
-            ] + bn_args
-            print(f"  CPU profiling at {perf_freq} Hz")
-        elif mode == "memory":
+        if mode == "memory":
             heap_prefix = output_dir / "heap"
             env["_RJEM_MALLOC_CONF"] = (
                 f"prof_active:true,prof_final:true,prof_prefix:{heap_prefix}"
             )
-            run_cmd = ["timeout", str(effective_timeout)] + bn_args
-            print(f"  Memory profiling (jemalloc)")
-        else:
-            print(f"ERROR: Invalid mode: {mode}", file=sys.stderr)
-            sys.exit(1)
 
         if not verbose:
             print("  (logs silenced, use --verbose to see them)")
         print()
 
-        # Start beacon API poller for epoch boundary detection + metrics scraping
+        # Start lighthouse directly
+        lh_stdout = None if verbose else subprocess.DEVNULL
+        lh_stderr = None if verbose else subprocess.DEVNULL
+        lighthouse_proc = subprocess.Popen(bn_args, env=env, stdout=lh_stdout, stderr=lh_stderr)
+
+        # Start beacon poller
         beacon_url = f"http://127.0.0.1:{http_port}"
         warmup = config.filtering.epoch_boundary_warmup
         cooldown = config.filtering.epoch_boundary_cooldown
@@ -290,68 +271,137 @@ def cmd_run(
             metrics_port=metrics_port,
             epoch_warmup=warmup,
             epoch_cooldown=cooldown,
-            target_epochs=runs if is_event_based else None,
+            target_epochs=epochs,
         )
+        beacon_poller.start(recording_start_time=time.time())
 
-        # Launch lighthouse
-        lh_stdout = None if verbose else subprocess.DEVNULL
-        lh_stderr = None if verbose else subprocess.DEVNULL
-        # Capture both clocks simultaneously for precise offset computation.
-        # perf uses CLOCK_MONOTONIC; our epoch timestamps use wall clock.
-        # offset = wall - monotonic (constant for system lifetime).
+        # Start progress display
+        perf_data = output_dir / "perf.data" if mode == "cpu" else None
+        progress = RunProgress(
+            beacon_poller,
+            watch_file=perf_data,
+            start_slot_offset=start_slot,
+            end_slot_offset=end_slot,
+            epochs=epochs,
+        )
+        progress.start()
+
+        # === Phase 1: Wait for sync ===
+        deadline = time.time() + effective_timeout
+        while time.time() < deadline and lighthouse_proc.poll() is None:
+            if beacon_poller.state.sync_complete_time is not None:
+                break
+            time.sleep(1.0)
+        else:
+            if lighthouse_proc.poll() is not None:
+                print(f"\n  ERROR: Lighthouse exited during sync (code {lighthouse_proc.returncode})")
+                sys.exit(1)
+
+        # === Phase 2: Wait for settle ===
+        progress.set_phase(PHASE_SETTLING)
+        while time.time() < deadline and lighthouse_proc.poll() is None:
+            if beacon_poller._settled:
+                break
+            time.sleep(1.0)
+
+        # === Phase 3: Wait for start slot ===
+        # If we're already past start_slot in this epoch, wait for the next one.
+        progress.set_phase(PHASE_WAITING)
+        slot = beacon_poller.state.last_slot
+        if slot is not None and (slot % SLOTS_PER_EPOCH) >= start_slot:
+            # Wait until we enter the next epoch
+            wait_for_epoch = (slot // SLOTS_PER_EPOCH) + 1
+            while time.time() < deadline and lighthouse_proc.poll() is None:
+                slot = beacon_poller.state.last_slot
+                if slot is not None and (slot // SLOTS_PER_EPOCH) >= wait_for_epoch:
+                    break
+                time.sleep(1.0)
+
+        # Now wait for start_slot within the current epoch
+        while time.time() < deadline and lighthouse_proc.poll() is None:
+            slot = beacon_poller.state.last_slot
+            if slot is not None:
+                if (slot % SLOTS_PER_EPOCH) >= start_slot:
+                    break
+            time.sleep(1.0)
+
+        # === Phase 4: Attach profiler ===
+        progress.set_phase(PHASE_PROFILING)
         recording_start = time.time()
         recording_start_monotonic = time.monotonic()
-        main_proc = subprocess.Popen(run_cmd, env=env, stdout=lh_stdout, stderr=lh_stderr)
 
-        # Start poller after lighthouse is launched (it needs time to start the API)
-        beacon_poller.start(recording_start_time=recording_start)
+        if mode == "cpu":
+            perf_proc = subprocess.Popen(
+                [
+                    "perf", "record", "-g",
+                    "-F", str(perf_freq),
+                    "-p", str(lighthouse_proc.pid),
+                    "-o", str(perf_data),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            # Brief pause to let perf attach
+            time.sleep(0.1)
 
-        # Wait for completion
-        watch_file = perf_data if mode == "cpu" else None
-        if is_event_based:
-            # Wait until target epochs captured or process exits
-            label = f"Waiting for {runs} epoch(s)"
-            with ProgressTimer(label, interval=1, watch_file=watch_file, beacon_poller=beacon_poller):
-                while main_proc.poll() is None:
-                    if beacon_poller.target_reached.wait(timeout=1.0):
-                        print(f"\n  Target reached: {runs} epoch(s) captured")
-                        main_proc.terminate()
-                        try:
-                            main_proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            main_proc.kill()
-                        break
-        else:
-            with ProgressTimer("Profiling", interval=1, watch_file=watch_file, beacon_poller=beacon_poller, total_duration=duration):
-                main_proc.wait()
+        # === Wait for epoch capture + end slot ===
+        # First wait for the epoch boundary to be captured
+        while time.time() < deadline and lighthouse_proc.poll() is None:
+            if beacon_poller.target_reached.is_set():
+                break
+            time.sleep(1.0)
+
+        # Then wait until we reach the end slot of the profiling unit
+        while time.time() < deadline and lighthouse_proc.poll() is None:
+            slot = beacon_poller.state.last_slot
+            if slot is not None:
+                slot_in_epoch = slot % SLOTS_PER_EPOCH
+                if slot_in_epoch >= end_slot and beacon_poller.target_reached.is_set():
+                    break
+            time.sleep(1.0)
+
         recording_end = time.time()
 
-        if main_proc.returncode not in (0, 124, -signal.SIGTERM):
-            print(f"  WARNING: Lighthouse exited with code {main_proc.returncode}")
+        # === Phase 5: Stop profiler ===
+        progress.set_phase(PHASE_DONE)
+        if perf_proc and perf_proc.poll() is None:
+            perf_proc.send_signal(signal.SIGINT)
+            try:
+                perf_proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                perf_proc.kill()
+
+        # Terminate lighthouse
+        if lighthouse_proc.poll() is None:
+            lighthouse_proc.terminate()
+            try:
+                lighthouse_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                lighthouse_proc.kill()
 
     finally:
         cleanup()
-        # Release lock file
         _release_lock(lock_file, lock_path)
-        # Restore signals
         signal.signal(signal.SIGINT, prev_sigint)
         signal.signal(signal.SIGTERM, prev_sigterm)
         if _signal_received:
             sys.exit(0)
 
-    # Save run.json — single source of truth for what happened
+    # Save run.json
     elapsed = recording_end - recording_start
     clock_offset = recording_start - recording_start_monotonic
     run_info = {
         "mode": mode,
         "network": network,
-        "filter_mode": filter_mode,
-        "duration": duration if not is_event_based else None,
-        "runs": runs if is_event_based else None,
+        "epochs": epochs,
+        "start_slot": start_slot,
+        "end_slot": end_slot,
         "elapsed_seconds": elapsed,
         "recording_start": recording_start,
         "recording_start_monotonic": recording_start_monotonic,
         "clock_offset": clock_offset,
+        "genesis_time": beacon_poller._genesis_time,
+        "sync_complete_time": beacon_poller.state.sync_complete_time,
         "build_profile": config.profiling.profile,
         "perf_frequency": perf_freq,
         "lighthouse_dir": str(lighthouse_dir),
@@ -364,8 +414,10 @@ def cmd_run(
     }
     (output_dir / "run.json").write_text(json.dumps(run_info, indent=2))
 
-    # Summary
-    print(f"\n{BOLD}=== Run complete ({elapsed:.0f}s) ==={RESET}")
+    # Clear progress line and print summary
+    sys.stdout.write("\r\033[K")
+    sys.stdout.flush()
+    print(f"\n{BOLD}=== Run complete ({elapsed:.0f}s profiling) ==={RESET}")
     print(f"  {BOLD}Output:{RESET} {output_dir}")
     for f in sorted(output_dir.iterdir()):
         if f.is_file():

@@ -69,22 +69,24 @@ class LighthouseConfig:
 @dataclass
 class ProfilingConfig:
     """Profiling configuration section."""
-    duration_seconds: int = 1800
     perf_frequency: int = 1000
     profile: str = "release"
     disable_backfill: bool = True
     output_dir: str = "./profiles"
     nickname: str = ""
+    start_slot: int = 16
+    end_slot: int = 15
 
     @classmethod
     def from_toml(cls, data: dict) -> "ProfilingConfig":
         return cls(
-            duration_seconds=data.get("duration_seconds", cls.duration_seconds),
             perf_frequency=data.get("perf_frequency", cls.perf_frequency),
             profile=data.get("profile", cls.profile),
             disable_backfill=data.get("disable_backfill", cls.disable_backfill),
             output_dir=data.get("output_dir", cls.output_dir),
             nickname=data.get("nickname", cls.nickname),
+            start_slot=data.get("start_slot", cls.start_slot),
+            end_slot=data.get("end_slot", cls.end_slot),
         )
 
 
@@ -93,14 +95,12 @@ class FilteringConfig:
     """Filtering configuration section."""
     epoch_boundary_warmup: float = 6.0
     epoch_boundary_cooldown: float = 6.0
-    max_wait_seconds: int = 7200
 
     @classmethod
     def from_toml(cls, data: dict) -> "FilteringConfig":
         return cls(
             epoch_boundary_warmup=data.get("epoch_boundary_warmup", cls.epoch_boundary_warmup),
             epoch_boundary_cooldown=data.get("epoch_boundary_cooldown", cls.epoch_boundary_cooldown),
-            max_wait_seconds=data.get("max_wait_seconds", cls.max_wait_seconds),
         )
 
 
@@ -167,16 +167,14 @@ def load_config(config_path: Path | None = None) -> "SpyglassConfig":
 def resolve_output_path(
     config: "SpyglassConfig",
     mode: str,
-    filter_mode: str,
     output_dir_override: str | None = None,
     nickname_override: str | None = None,
 ) -> Path:
-    """Construct the full output path: <output_dir>/<nickname_or_hash>/<mode>/<filter>/
+    """Construct the full output path: <output_dir>/<nickname_or_hash>/<mode>/
 
     Args:
         config: Parsed SpyglassConfig
         mode: "cpu" or "memory"
-        filter_mode: "all", "epoch-boundary", "mid-epoch", "steady-state"
         output_dir_override: Override output_dir from config
         nickname_override: Override nickname from config (CLI --nickname)
     """
@@ -189,10 +187,7 @@ def resolve_output_path(
         # Auto-detect from git branch name in the lighthouse repo
         run_name = _get_lighthouse_branch(config)
 
-    # Normalize filter name for filesystem
-    filter_dir = filter_mode.replace("-", "_")
-
-    return base / run_name / mode / filter_dir
+    return base / run_name / mode
 
 
 def _get_lighthouse_branch(config: "SpyglassConfig") -> str:

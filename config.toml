@@ -16,30 +16,27 @@ http_port = 5052
 metrics_port = 5054
 
 [profiling]
-# How long to run the profiled process (seconds)
-duration_seconds = 1800
 # perf sampling frequency (Hz). 1000 is sufficient for most analysis;
 # higher values produce larger perf.data files.
 perf_frequency = 1000
 # Cargo build profile: "release" (recommended) or "release-debug"
-# WARNING: release-debug produces much larger perf.data files and significantly
-# slower analysis. Not recommended for profiling runs over 10 minutes.
 profile = "release"
-# Disable backfill sync (recommended for profiling steady-state)
+# Disable backfill sync (recommended for profiling)
 disable_backfill = true
 # Base output directory for profile results
 output_dir = "./profiles"
-# Run nickname. If set, used as the subdirectory name instead of the commit hash.
-# Useful for labeling experiments (e.g. "bf4-perfield", "tracing-fix")
+# Run nickname. If set, used as the subdirectory name instead of the branch name.
 nickname = ""
+# Slot within the epoch to start recording (0-31). Default 16 = mid-epoch.
+start_slot = 16
+# Slot within the epoch to stop recording (0-31). Default 15 = one full epoch captured.
+end_slot = 15
 
 [filtering]
 # Seconds before an epoch boundary to include in "epoch-boundary" filter
 epoch_boundary_warmup = 6
 # Seconds after an epoch boundary to include in "epoch-boundary" filter
 epoch_boundary_cooldown = 6
-# Safety timeout for epoch-boundary mode (max wait time in seconds)
-max_wait_seconds = 7200
 
 [mock_el]
 # Address for the mock execution layer
