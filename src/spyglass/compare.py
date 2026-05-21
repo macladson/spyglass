@@ -8,11 +8,11 @@ from .categories import load_categories, categorize_collapsed
 from .constants import BOLD, RESET
 
 
-def cmd_compare(config: dict, dir_a: Path, dir_b: Path, filter_mode: str = "all"):
+def cmd_compare(config, dir_a: Path, dir_b: Path, filter_mode: str = "all"):
     """Compare two profile directories and produce a comparison markdown.
     
     Args:
-        config: Parsed config dict
+        config: Spyglass configuration object
         dir_a: Baseline profile directory
         dir_b: Comparison profile directory
         filter_mode: Which collapsed file to use (matches suffix convention)
@@ -55,8 +55,7 @@ def cmd_compare(config: dict, dir_a: Path, dir_b: Path, filter_mode: str = "all"
     ]
 
     # Category comparison (if categories.toml exists)
-    config_dir = config.get("_config_dir", "")
-    categories_path = Path(config_dir) / "categories.toml" if config_dir else None
+    categories_path = config.config_dir / "categories.toml"
     categories = load_categories(categories_path)
     if categories:
         cat_a = categorize_collapsed(collapsed_a, categories)

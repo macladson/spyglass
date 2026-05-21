@@ -199,9 +199,8 @@ def main():
         from .pr import fetch_pr
         worktree_path = fetch_pr(config, args.pr, verbose=verbose)
         # Override lighthouse_dir in config to point at the checkout
-        config["paths"] = config.get("paths", {})
-        config["paths"]["lighthouse_dir"] = str(worktree_path)
-        config["_pr_number"] = args.pr
+        config.paths.lighthouse_dir = worktree_path
+        config.pr_number = args.pr
         # Default nickname to pr-<number> if not explicitly set
         if not args.nickname:
             args.nickname = f"pr-{args.pr}"

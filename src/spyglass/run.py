@@ -1,5 +1,6 @@
 """Run Lighthouse under CPU or memory profiling."""
 
+import fcntl
 import json
 import os
 import secrets
@@ -11,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config as cfg
+from .config import SpyglassConfig, get_lighthouse_commit_hash
 from .beacon_api import BeaconApiPoller
 from .constants import BOLD, RESET
 from .progress import ProgressTimer
@@ -49,8 +50,49 @@ def generate_jwt(path: Path):
     path.write_text(secrets.token_hex(32))
 
 
+def _acquire_lock(lock_path: Path):
+    """Acquire an exclusive lock file to prevent concurrent runs.
+
+    Uses fcntl.flock() for advisory locking. The lock is automatically
+    released by the kernel if the process crashes or is killed.
+
+    Returns the open file handle (must be kept alive for the lock duration).
+    """
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_file.close()
+        print(
+            f"ERROR: Another spyglass process is already running in this output directory.",
+            file=sys.stderr,
+        )
+        print(f"  Lock file: {lock_path}", file=sys.stderr)
+        print(f"  If no other process is running, remove the lock file and retry.", file=sys.stderr)
+        sys.exit(1)
+    # Write PID for debugging purposes
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+    return lock_file
+
+
+def _release_lock(lock_file, lock_path: Path):
+    """Release the lock file and remove it."""
+    if lock_file is None:
+        return
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
+    except OSError:
+        pass
+    try:
+        lock_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def cmd_run(
-    config: dict,
+    config: SpyglassConfig,
     mode: str,
     output_dir: Path,
     verbose: bool = False,
@@ -60,9 +102,9 @@ def cmd_run(
     force: bool = False,
 ):
     """Run Lighthouse under profiling.
-    
+
     Args:
-        config: Parsed config dict
+        config: Spyglass configuration object
         mode: "cpu" or "memory"
         output_dir: Directory for profiling output
         verbose: Show lighthouse/mock-el output
@@ -71,24 +113,24 @@ def cmd_run(
         runs: Number of epochs to capture (only for epoch-boundary mode)
     """
     output_dir = output_dir.resolve()
-    lighthouse_dir = cfg.resolve_lighthouse_dir(config)
-    duration = duration_override or cfg.duration(config)
-    max_wait = cfg.max_wait_seconds(config)
-    perf_freq = cfg.perf_frequency(config)
-    sync_url = cfg.checkpoint_sync_url(config)
-    network = cfg.network(config)
-    flags = cfg.extra_flags(config)
-    mel_addr = cfg.mock_el_address(config)
-    mel_port = cfg.mock_el_port(config)
-    http_port = cfg.http_port(config)
-    metrics_port = cfg.metrics_port(config)
+    lighthouse_dir = config.paths.lighthouse_dir
+    duration = duration_override or config.profiling.duration_seconds
+    max_wait = config.filtering.max_wait_seconds
+    perf_freq = config.profiling.perf_frequency
+    sync_url = config.lighthouse.checkpoint_sync_url
+    network = config.lighthouse.network
+    flags = config.lighthouse.extra_flags
+    mel_addr = config.mock_el.listen_address
+    mel_port = config.mock_el.listen_port
+    http_port = config.lighthouse.http_port
+    metrics_port = config.lighthouse.metrics_port
 
     # For epoch-boundary mode, use safety timeout instead of fixed duration
     is_event_based = filter_mode == "epoch-boundary"
     effective_timeout = max_wait if is_event_based else duration
 
-    lighthouse_bin = cfg.lighthouse_binary(config)
-    lcli_bin = cfg.lcli_binary(config)
+    lighthouse_bin = config.lighthouse_binary
+    lcli_bin = config.lcli_binary
 
     if not lighthouse_bin.exists():
         print(f"ERROR: Binary not found: {lighthouse_bin}", file=sys.stderr)
@@ -122,6 +164,10 @@ def cmd_run(
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Acquire lock file to prevent concurrent runs on same output directory
+    lock_path = output_dir / ".spyglass.lock"
+    lock_file = _acquire_lock(lock_path)
+
     # Generate JWT
     jwt_path = output_dir / "jwt.hex"
     generate_jwt(jwt_path)
@@ -131,6 +177,7 @@ def cmd_run(
         str(lcli_bin),
         "--network", network,
         "mock-el",
+        "--all-payloads-valid", "true",
         "--jwt-output-path", str(jwt_path),
         "--listen-address", mel_addr,
         "--listen-port", str(mel_port),
@@ -145,9 +192,17 @@ def cmd_run(
     # Process tracking for signal cleanup
     main_proc = None
     beacon_poller = None
+    _cleanup_done = False
+    _signal_received = False
 
     def cleanup(signum=None, frame=None):
         """Graceful shutdown of all child processes."""
+        nonlocal _cleanup_done, _signal_received
+        if _cleanup_done:
+            return
+        _cleanup_done = True
+        if signum:
+            _signal_received = True
         if beacon_poller:
             beacon_poller.stop()
         if main_proc and main_proc.poll() is None:
@@ -162,8 +217,6 @@ def cmd_run(
                 mock_el_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 mock_el_proc.kill()
-        if signum:
-            sys.exit(0)
 
     prev_sigint = signal.getsignal(signal.SIGINT)
     prev_sigterm = signal.getsignal(signal.SIGTERM)
@@ -229,8 +282,8 @@ def cmd_run(
 
         # Start beacon API poller for epoch boundary detection + metrics scraping
         beacon_url = f"http://127.0.0.1:{http_port}"
-        warmup = cfg.epoch_boundary_warmup(config)
-        cooldown = cfg.epoch_boundary_cooldown(config)
+        warmup = config.filtering.epoch_boundary_warmup
+        cooldown = config.filtering.epoch_boundary_cooldown
         beacon_poller = BeaconApiPoller(
             beacon_url, output_dir,
             poll_interval=3.0,
@@ -243,7 +296,11 @@ def cmd_run(
         # Launch lighthouse
         lh_stdout = None if verbose else subprocess.DEVNULL
         lh_stderr = None if verbose else subprocess.DEVNULL
+        # Capture both clocks simultaneously for precise offset computation.
+        # perf uses CLOCK_MONOTONIC; our epoch timestamps use wall clock.
+        # offset = wall - monotonic (constant for system lifetime).
         recording_start = time.time()
+        recording_start_monotonic = time.monotonic()
         main_proc = subprocess.Popen(run_cmd, env=env, stdout=lh_stdout, stderr=lh_stderr)
 
         # Start poller after lighthouse is launched (it needs time to start the API)
@@ -273,22 +330,18 @@ def cmd_run(
             print(f"  WARNING: Lighthouse exited with code {main_proc.returncode}")
 
     finally:
-        # Stop beacon poller (writes epochs.json, sync_status.json)
-        if beacon_poller:
-            beacon_poller.stop()
-        # Kill mock-el
-        if mock_el_proc.poll() is None:
-            mock_el_proc.terminate()
-            try:
-                mock_el_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                mock_el_proc.kill()
+        cleanup()
+        # Release lock file
+        _release_lock(lock_file, lock_path)
         # Restore signals
         signal.signal(signal.SIGINT, prev_sigint)
         signal.signal(signal.SIGTERM, prev_sigterm)
+        if _signal_received:
+            sys.exit(0)
 
     # Save run.json — single source of truth for what happened
     elapsed = recording_end - recording_start
+    clock_offset = recording_start - recording_start_monotonic
     run_info = {
         "mode": mode,
         "network": network,
@@ -296,14 +349,18 @@ def cmd_run(
         "duration": duration if not is_event_based else None,
         "runs": runs if is_event_based else None,
         "elapsed_seconds": elapsed,
-        "build_profile": cfg.profile(config),
+        "recording_start": recording_start,
+        "recording_start_monotonic": recording_start_monotonic,
+        "clock_offset": clock_offset,
+        "build_profile": config.profiling.profile,
         "perf_frequency": perf_freq,
         "lighthouse_dir": str(lighthouse_dir),
         "lighthouse_bin": str(lighthouse_bin),
+        "lighthouse_commit": get_lighthouse_commit_hash(config),
         "checkpoint_sync_url": sync_url,
         "extra_flags": flags,
         "mock_el": f"{mel_addr}:{mel_port}",
-        "pr": config.get("_pr_number"),
+        "pr": config.pr_number,
     }
     (output_dir / "run.json").write_text(json.dumps(run_info, indent=2))
 

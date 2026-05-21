@@ -1,9 +1,14 @@
-"""Beacon API client for sync detection and epoch boundary tracking."""
+"""Beacon API client for sync detection and epoch boundary tracking.
+
+Uses Server-Sent Events (SSE) for near-instant head slot notifications
+and genesis-time-based computation for precise slot/epoch boundary timing.
+"""
 
 import json
 import threading
 import time
 import urllib.request
+import urllib.error
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,7 +20,8 @@ class EpochBoundary:
     """Record of an observed epoch boundary."""
     epoch: int
     slot: int
-    timestamp: float  # unix timestamp when this was observed
+    slot_start_time: float  # computed: genesis_time + slot * SECONDS_PER_SLOT
+    detected_at: float  # wall-clock time when SSE event arrived
 
 
 @dataclass
@@ -28,13 +34,29 @@ class BeaconState:
 
 
 class BeaconApiPoller:
-    """Background thread that polls the beacon API to track epochs and sync status.
-    
+    """Background tracker using SSE for head events and genesis-based timing.
+
+    Architecture:
+      - SSE thread: subscribes to /eth/v1/events?topics=head for near-instant
+        slot notifications. Detects epoch boundaries and schedules metric snapshots.
+      - Poll thread: checks sync status, fetches genesis time, fires scheduled
+        metric snapshots at precise times, and handles the target_reached signaling.
+
+    Timing strategy:
+      Slot/epoch boundary times are computed deterministically from genesis_time:
+        slot_start = genesis_time + slot * SECONDS_PER_SLOT
+      This is independent of when blocks arrive or when SSE events fire.
+
+    Metric snapshot strategy:
+      - "pre" snapshot: taken `warmup` seconds BEFORE the computed epoch boundary time
+        (scheduled when we see the penultimate slot of an epoch)
+      - "post" snapshot: taken `cooldown` seconds AFTER the computed epoch boundary time
+      - Delta: computed from pre→post, capturing the full epoch processing window
+
     Writes results to an output directory as JSON files:
-      - epochs.json: list of observed epoch boundaries with timestamps
-      - sync_status.json: when sync completed
-    
-    Optionally scrapes Prometheus metrics around epoch boundaries.
+      - epochs.json: list of observed epoch boundaries with computed timestamps
+      - sync_status.json: genesis time, when sync completed
+      - metrics/: pre/post/delta metric snapshots
     """
 
     def __init__(
@@ -43,9 +65,10 @@ class BeaconApiPoller:
         output_dir: Path,
         poll_interval: float = 2.0,
         metrics_port: int | None = 5054,
-        epoch_warmup: float = 15.0,
-        epoch_cooldown: float = 15.0,
+        epoch_warmup: float = 6.0,
+        epoch_cooldown: float = 6.0,
         target_epochs: int | None = None,
+        genesis_time: float | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.output_dir = output_dir
@@ -56,72 +79,187 @@ class BeaconApiPoller:
         self.target_epochs = target_epochs
         self.state = BeaconState()
         self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._sse_thread: threading.Thread | None = None
+        self._poll_thread: threading.Thread | None = None
         self._pending_snapshots: list[dict] = []
-        self._sync_snapshot_taken = False
         self._completed_epochs = 0  # Epochs that have finished their cooldown
         self._is_tracking_live = False  # True once we see single-slot advances
-        # Set when target_epochs have been captured (+ cooldown elapsed)
+        self._pre_scheduled_for_epoch: int | None = None  # Avoid duplicate pre-snapshots
+        self._genesis_time: float | None = genesis_time
+        self._settled = False  # True once we have enough lead time after sync
         self.target_reached = threading.Event()
 
     def start(self, recording_start_time: float | None = None):
-        """Start the background polling thread."""
+        """Start the background SSE and polling threads."""
         self.state.recording_start_time = recording_start_time or time.time()
-        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
-        self._thread.start()
+        self._sse_thread = threading.Thread(target=self._sse_loop, daemon=True)
+        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._sse_thread.start()
+        self._poll_thread.start()
 
     def stop(self):
-        """Stop the polling thread and write results."""
+        """Stop all threads and write results."""
         self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=5)
+        if self._sse_thread:
+            self._sse_thread.join(timeout=5)
+        if self._poll_thread:
+            self._poll_thread.join(timeout=5)
         self._write_results()
 
-    def _poll_loop(self):
-        """Main polling loop."""
+    def slot_start_time(self, slot: int) -> float | None:
+        """Compute the wall-clock start time for a given slot.
+
+        Returns None if genesis_time hasn't been fetched yet.
+        """
+        if self._genesis_time is None:
+            return None
+        return self._genesis_time + slot * SECONDS_PER_SLOT
+
+    def epoch_start_time(self, epoch: int) -> float | None:
+        """Compute the wall-clock start time for a given epoch.
+
+        Returns None if genesis_time hasn't been fetched yet.
+        """
+        return self.slot_start_time(epoch * SLOTS_PER_EPOCH)
+
+    # ─── SSE Thread ───────────────────────────────────────────────────────────
+
+    def _sse_loop(self):
+        """Connect to SSE endpoint and process head events. Reconnects on failure."""
         while not self._stop_event.is_set():
             try:
-                self._poll_once()
+                self._sse_listen()
             except Exception:
-                pass  # Network errors are expected during startup
-            self._stop_event.wait(self.poll_interval)
+                pass
+            self._stop_event.wait(2.0)
 
-    def _poll_once(self):
-        """Single poll iteration: check sync + head slot."""
+    def _sse_listen(self):
+        """Single SSE connection session. Blocks until disconnect or stop."""
+        url = f"{self.base_url}/eth/v1/events?topics=head"
+        req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
+        resp = urllib.request.urlopen(req, timeout=60)  # 60s detects dead connections
+        try:
+            self._read_sse_stream(resp)
+        finally:
+            resp.close()
+
+    def _read_sse_stream(self, resp):
+        """Parse an SSE stream, dispatching head events."""
+        event_data = ""
+        for raw_line in resp:
+            if self._stop_event.is_set():
+                break
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\n\r")
+            if line == "":
+                # Empty line = end of event
+                if event_data:
+                    try:
+                        self._handle_head_event(json.loads(event_data))
+                    except (json.JSONDecodeError, KeyError, ValueError):
+                        pass
+                    event_data = ""
+            elif line.startswith("data:"):
+                event_data += line[5:].strip()
+
+    _MIN_LEAD_SLOTS = 2  # Slots of lead time required after sync before profiling
+
+    def _handle_head_event(self, data: dict):
+        """Process a head SSE event."""
+        slot = int(data["slot"])
+        epoch_transition = data.get("epoch_transition", False)
         now = time.time()
 
-        # Check sync status
-        syncing = self._get_syncing()
-        if syncing is not None:
-            if not syncing and self.state.sync_complete_time is None:
-                self.state.sync_complete_time = now
-                self._on_sync_complete()
-
-        # Check head slot for epoch boundary detection
-        head_slot = self._get_head_slot()
-        if head_slot is not None:
-            current_epoch = head_slot // SLOTS_PER_EPOCH
+        with self._lock:
+            # Update tracking state
             if self.state.last_slot is not None:
-                slot_diff = head_slot - self.state.last_slot
-                # Detect live tracking: slot advances by 0-2 (normal, including missed slots)
+                slot_diff = slot - self.state.last_slot
                 if self.state.sync_complete_time is not None and 0 <= slot_diff <= 2:
                     self._is_tracking_live = True
+            self.state.last_slot = slot
 
-                last_epoch = self.state.last_slot // SLOTS_PER_EPOCH
-                # Only track boundaries after sync completes (during sync, epochs
-                # fly by as the node catches up and shouldn't count toward target)
-                if current_epoch > last_epoch and self.state.sync_complete_time is not None:
-                    boundary = EpochBoundary(
-                        epoch=current_epoch,
-                        slot=current_epoch * SLOTS_PER_EPOCH,
-                        timestamp=now,
-                    )
-                    self.state.epoch_boundaries.append(boundary)
-                    self._on_epoch_boundary(boundary)
-            self.state.last_slot = head_slot
+            if self.state.sync_complete_time is None or self._genesis_time is None:
+                return
 
-        # Check for pending post-boundary metric snapshots
-        self._check_pending_snapshots(now)
+            current_epoch = slot // SLOTS_PER_EPOCH
+            slot_in_epoch = slot % SLOTS_PER_EPOCH
+
+            # After sync, wait until we're far enough from an epoch boundary
+            # to avoid profiling while still recovering. Once settled, stays settled.
+            if not self._settled:
+                if slot_in_epoch < SLOTS_PER_EPOCH - self._MIN_LEAD_SLOTS:
+                    self._settled = True
+                return
+
+            # Penultimate slot: schedule pre-snapshot before the upcoming boundary
+            if slot_in_epoch == SLOTS_PER_EPOCH - 1:
+                next_epoch = current_epoch + 1
+                if self._pre_scheduled_for_epoch != next_epoch:
+                    boundary_time = self._genesis_time + next_epoch * SLOTS_PER_EPOCH * SECONDS_PER_SLOT
+                    self._pending_snapshots.append({
+                        "epoch": next_epoch,
+                        "trigger_time": boundary_time - self.epoch_warmup,
+                        "phase": "pre",
+                    })
+                    self._pre_scheduled_for_epoch = next_epoch
+
+            # Epoch boundary: record and schedule post-snapshot
+            if epoch_transition:
+                boundary_time = self._genesis_time + current_epoch * SLOTS_PER_EPOCH * SECONDS_PER_SLOT
+                boundary = EpochBoundary(
+                    epoch=current_epoch,
+                    slot=slot,
+                    slot_start_time=boundary_time,
+                    detected_at=now,
+                )
+                self.state.epoch_boundaries.append(boundary)
+
+                # Fallback pre-snapshot if penultimate slot was missed
+                if self._pre_scheduled_for_epoch != current_epoch:
+                    self._pending_snapshots.append({
+                        "epoch": current_epoch,
+                        "trigger_time": now,  # Immediately (late fallback)
+                        "phase": "pre",
+                    })
+
+                self._pending_snapshots.append({
+                    "epoch": current_epoch,
+                    "trigger_time": boundary_time + self.epoch_cooldown,
+                    "phase": "post",
+                })
+
+    # ─── Poll Thread ──────────────────────────────────────────────────────────
+
+    def _poll_loop(self):
+        """Poll sync status, fetch genesis, and fire pending metric snapshots."""
+        while not self._stop_event.is_set():
+            try:
+                now = time.time()
+                self._ensure_genesis_time()
+                self._check_sync(now)
+                self._fire_pending_snapshots(now)
+            except Exception:
+                pass
+            self._stop_event.wait(1.0)
+
+    def _ensure_genesis_time(self):
+        """Fetch genesis_time from the beacon API if not already known."""
+        if self._genesis_time is not None:
+            return
+        try:
+            data = self._api_get("/eth/v1/beacon/genesis")
+            self._genesis_time = int(data["data"]["genesis_time"])
+        except Exception:
+            pass
+
+    def _check_sync(self, now: float):
+        """Check if the node has finished syncing."""
+        syncing = self._get_syncing()
+        if syncing is not None and not syncing:
+            with self._lock:
+                if self.state.sync_complete_time is None:
+                    self.state.sync_complete_time = now
+                    self._on_sync_complete()
 
     def _on_sync_complete(self):
         """Called when sync completes. Takes a steady-state baseline snapshot."""
@@ -130,54 +268,39 @@ class BeaconApiPoller:
         metrics = self._scrape_metrics()
         if metrics is not None:
             self._save_metrics_snapshot("steady_state", "start", metrics)
-            # Schedule an end snapshot after one epoch duration
             self._pending_snapshots.append({
                 "epoch": "steady_state",
                 "trigger_time": time.time() + (SLOTS_PER_EPOCH * SECONDS_PER_SLOT),
                 "phase": "end",
             })
 
-    def _on_epoch_boundary(self, boundary: EpochBoundary):
-        """Called when an epoch boundary is detected. Scrapes pre-snapshot metrics."""
-        if self.metrics_port is None:
-            return
+    def _fire_pending_snapshots(self, now: float):
+        """Fire any metric snapshots that are due."""
+        with self._lock:
+            due = [p for p in self._pending_snapshots if now >= p["trigger_time"]]
+            self._pending_snapshots = [p for p in self._pending_snapshots if now < p["trigger_time"]]
 
-        # Take the "pre" snapshot immediately (we just detected the boundary)
-        pre_metrics = self._scrape_metrics()
-        if pre_metrics is not None:
-            self._save_metrics_snapshot(boundary.epoch, "pre", pre_metrics)
-
-        # Schedule a post-snapshot after cooldown
-        self._pending_snapshots.append({
-            "epoch": boundary.epoch,
-            "trigger_time": boundary.timestamp + self.epoch_cooldown,
-            "phase": "post",
-        })
-
-    def _check_pending_snapshots(self, now: float):
-        """Check if any scheduled metric snapshots are due."""
-        remaining = []
-        for pending in self._pending_snapshots:
-            if now >= pending["trigger_time"]:
-                if self.metrics_port is not None:
-                    phase = pending.get("phase", "post")
-                    metrics = self._scrape_metrics()
-                    if metrics is not None:
-                        self._save_metrics_snapshot(pending["epoch"], phase, metrics)
+        # Execute snapshot I/O without holding the lock
+        for pending in due:
+            if self.metrics_port is not None:
+                metrics = self._scrape_metrics()
+                if metrics is not None:
+                    self._save_metrics_snapshot(pending["epoch"], pending["phase"], metrics)
+                    if pending["phase"] == "post":
                         self._compute_and_save_delta(pending["epoch"])
 
-                # Check if this completes an epoch-boundary target
-                if (
-                    self.target_epochs is not None
-                    and isinstance(pending.get("epoch"), int)
-                    and pending.get("phase", "post") == "post"
-                ):
+            # Check if this completes an epoch-boundary target
+            if (
+                self.target_epochs is not None
+                and isinstance(pending.get("epoch"), int)
+                and pending["phase"] == "post"
+            ):
+                with self._lock:
                     self._completed_epochs += 1
                     if self._completed_epochs >= self.target_epochs:
                         self.target_reached.set()
-            else:
-                remaining.append(pending)
-        self._pending_snapshots = remaining
+
+    # ─── Metrics I/O ─────────────────────────────────────────────────────────
 
     def _scrape_metrics(self) -> str | None:
         """Scrape Prometheus metrics from the lighthouse metrics endpoint."""
@@ -197,7 +320,7 @@ class BeaconApiPoller:
         path.write_text(content)
 
     def _compute_and_save_delta(self, epoch: int | str):
-        """Compute delta between start/pre and end/post snapshots."""
+        """Compute delta between pre and post snapshots."""
         metrics_dir = self.output_dir / "metrics"
 
         # Try both naming conventions: pre/post (epoch) and start/end (steady_state)
@@ -214,11 +337,11 @@ class BeaconApiPoller:
         pre_values = _parse_prometheus_text(pre_path.read_text())
         post_values = _parse_prometheus_text(post_path.read_text())
 
-        # Compute deltas for counters (values that increased)
+        # Compute deltas (include both increases and decreases)
         deltas = {}
         for key, post_val in post_values.items():
             pre_val = pre_values.get(key)
-            if pre_val is not None and post_val > pre_val:
+            if pre_val is not None and post_val != pre_val:
                 deltas[key] = {
                     "pre": pre_val,
                     "post": post_val,
@@ -228,19 +351,13 @@ class BeaconApiPoller:
         delta_path = metrics_dir / f"epoch_{epoch}_delta.json"
         delta_path.write_text(json.dumps(deltas, indent=2, sort_keys=True))
 
+    # ─── Beacon API Helpers ───────────────────────────────────────────────────
+
     def _get_syncing(self) -> bool | None:
         """GET /eth/v1/node/syncing -> is_syncing bool."""
         try:
             data = self._api_get("/eth/v1/node/syncing")
             return data["data"]["is_syncing"]
-        except Exception:
-            return None
-
-    def _get_head_slot(self) -> int | None:
-        """GET /eth/v1/beacon/headers/head -> slot."""
-        try:
-            data = self._api_get("/eth/v1/beacon/headers/head")
-            return int(data["data"]["header"]["message"]["slot"])
         except Exception:
             return None
 
@@ -251,6 +368,8 @@ class BeaconApiPoller:
         with urllib.request.urlopen(req, timeout=2) as resp:
             return json.loads(resp.read())
 
+    # ─── Results Output ───────────────────────────────────────────────────────
+
     def _write_results(self):
         """Write tracking results to the output directory."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -260,7 +379,8 @@ class BeaconApiPoller:
             {
                 "epoch": eb.epoch,
                 "slot": eb.slot,
-                "timestamp": eb.timestamp,
+                "slot_start_time": eb.slot_start_time,
+                "detected_at": eb.detected_at,
             }
             for eb in self.state.epoch_boundaries
         ]
@@ -269,6 +389,7 @@ class BeaconApiPoller:
 
         # Write sync status
         sync_data = {
+            "genesis_time": self._genesis_time,
             "sync_complete_time": self.state.sync_complete_time,
             "recording_start_time": self.state.recording_start_time,
             "epochs_observed": len(self.state.epoch_boundaries),
@@ -279,7 +400,7 @@ class BeaconApiPoller:
 
 def _parse_prometheus_text(text: str) -> dict[str, float]:
     """Parse Prometheus text exposition format into metric_name -> value dict.
-    
+
     Only parses simple numeric values (counters, gauges). Skips histograms/summaries
     and comment lines.
     """

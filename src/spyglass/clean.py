@@ -3,25 +3,25 @@
 import shutil
 from pathlib import Path
 
-from . import config as cfg
+from .config import SpyglassConfig
 from .constants import format_size
 from .pr import CHECKOUTS_DIR
 
 
-def cmd_clean(config: dict, what: str = "all", verbose: bool = False):
+def cmd_clean(config: SpyglassConfig, what: str = "all", verbose: bool = False):
     """Remove spyglass artifacts.
     
     Args:
-        config: Parsed config dict
+        config: Spyglass configuration object
         what: What to clean — "all", "checkouts", or "profiles"
     """
-    project_root = Path(config.get("_config_dir", Path(__file__).resolve().parent.parent.parent))
+    project_root = config.config_dir
 
     targets = []
     if what in ("all", "checkouts"):
         targets.append(("checkouts", project_root / CHECKOUTS_DIR))
     if what in ("all", "profiles"):
-        output_dir = Path(cfg.output_dir(config))
+        output_dir = Path(config.profiling.output_dir)
         if not output_dir.is_absolute():
             output_dir = (project_root / output_dir).resolve()
         targets.append(("profiles", output_dir))

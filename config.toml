@@ -35,9 +35,9 @@ nickname = ""
 
 [filtering]
 # Seconds before an epoch boundary to include in "epoch-boundary" filter
-epoch_boundary_warmup = 15
+epoch_boundary_warmup = 6
 # Seconds after an epoch boundary to include in "epoch-boundary" filter
-epoch_boundary_cooldown = 15
+epoch_boundary_cooldown = 6
 # Safety timeout for epoch-boundary mode (max wait time in seconds)
 max_wait_seconds = 7200
 

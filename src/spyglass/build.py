@@ -5,11 +5,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import config as cfg
+from .config import SpyglassConfig
 from .constants import BOLD, RESET
 
 
-def cmd_build(config: dict, mode: str, verbose: bool = False):
+def cmd_build(config: SpyglassConfig, mode: str, verbose: bool = False):
     """Build Lighthouse with profiling instrumentation.
     
     For CPU mode: builds with frame pointers enabled.
@@ -19,14 +19,14 @@ def cmd_build(config: dict, mode: str, verbose: bool = False):
     No file modifications are needed — everything is controlled via env vars and feature flags.
     
     Args:
-        config: Parsed config dict
+        config: Spyglass configuration object
         mode: "cpu", "memory", or "both"
         verbose: Show build output
     """
-    lighthouse_dir = cfg.resolve_lighthouse_dir(config)
-    profile = cfg.profile(config)
-    do_disable_backfill = cfg.disable_backfill(config)
-    duration_secs = cfg.duration(config)
+    lighthouse_dir = config.paths.lighthouse_dir
+    profile = config.profiling.profile
+    do_disable_backfill = config.profiling.disable_backfill
+    duration_secs = config.profiling.duration_seconds
 
     if not lighthouse_dir.exists():
         print(f"ERROR: Lighthouse directory not found: {lighthouse_dir}", file=sys.stderr)

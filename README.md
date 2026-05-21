@@ -71,8 +71,6 @@ python3 -m spyglass build --mode both     # Both
 - CPU mode: passes `RUSTFLAGS="-C force-frame-pointers=yes"`
 - Memory mode: uses `--profile release-profiling` with `--features jemalloc-profiling` and sets `JEMALLOC_SYS_WITH_MALLOC_CONF` with `prof:true`
 
-No source files are modified — everything is controlled via env vars and cargo features.
-
 ### `run`
 
 Runs Lighthouse under a profiler with a mock execution layer.

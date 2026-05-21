@@ -6,7 +6,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from . import config as cfg
+from .config import SpyglassConfig
 from .categories import load_categories, categorize_collapsed, format_category_report
 from .constants import BOLD, RESET
 from .filters import compute_time_ranges, filter_collapsed_stacks
@@ -30,24 +30,30 @@ def collapse_perf_data(perf_data: Path, collapsed_path: Path):
         stderr=subprocess.DEVNULL,
         env=env,
     )
-    with open(collapsed_path, "w") as out:
+    out = open(collapsed_path, "w")
+    try:
         collapse_proc = subprocess.Popen(
             ["inferno-collapse-perf"],
             stdin=perf_proc.stdout,
             stdout=out,
             stderr=subprocess.PIPE,
         )
-    perf_proc.stdout.close()
-    with ProgressTimer("Collapsing stacks", interval=15, watch_file=collapsed_path):
-        collapse_proc.wait()
-        perf_proc.wait()
+        # Allow perf_proc to receive SIGPIPE if collapse_proc exits early
+        perf_proc.stdout.close()
+
+        with ProgressTimer("Collapsing stacks", interval=15, watch_file=collapsed_path):
+            # Read stderr before wait() to prevent deadlock on large error output
+            collapse_stderr = collapse_proc.stderr.read()
+            collapse_proc.wait()
+            perf_proc.wait()
+    finally:
+        out.close()
 
     if perf_proc.returncode != 0:
         print(f"ERROR: perf script failed (exit code {perf_proc.returncode})", file=sys.stderr)
         sys.exit(1)
     if collapse_proc.returncode != 0:
-        stderr = collapse_proc.stderr.read().decode()
-        print(f"ERROR: inferno-collapse-perf failed: {stderr}", file=sys.stderr)
+        print(f"ERROR: inferno-collapse-perf failed: {collapse_stderr.decode()}", file=sys.stderr)
         sys.exit(1)
 
     size_kb = collapsed_path.stat().st_size / 1024
@@ -163,7 +169,7 @@ def write_analysis_md(
 
 
 def cmd_analyze(
-    config: dict,
+    config: SpyglassConfig,
     profile_dir: Path,
     filter_mode: str = "all",
     verbose: bool = False,
@@ -171,7 +177,7 @@ def cmd_analyze(
     """Analyze profiling output.
     
     Args:
-        config: Parsed config dict
+        config: Spyglass configuration object
         profile_dir: Directory containing profiling output
         filter_mode: "all", "epoch-boundary", "mid-epoch", or "steady-state".
                      If "all" and run.json exists, defaults to the filter
@@ -207,7 +213,7 @@ def cmd_analyze(
         sys.exit(1)
 
 
-def _analyze_cpu(config: dict, profile_dir: Path, perf_data: Path, filter_mode: str):
+def _analyze_cpu(config: SpyglassConfig, profile_dir: Path, perf_data: Path, filter_mode: str):
     """CPU profile analysis pipeline."""
     print(f"{BOLD}=== Analyze (CPU) ==={RESET}")
     print(f"  {BOLD}Filter:{RESET} {filter_mode}")
@@ -225,8 +231,8 @@ def _analyze_cpu(config: dict, profile_dir: Path, perf_data: Path, filter_mode: 
         collapsed_path = collapsed_full
         suffix = ""
     else:
-        warmup = cfg.epoch_boundary_warmup(config)
-        cooldown = cfg.epoch_boundary_cooldown(config)
+        warmup = config.filtering.epoch_boundary_warmup
+        cooldown = config.filtering.epoch_boundary_cooldown
         time_ranges = compute_time_ranges(profile_dir, filter_mode, warmup, cooldown)
 
         if time_ranges is None:
@@ -272,11 +278,11 @@ def _analyze_cpu(config: dict, profile_dir: Path, perf_data: Path, filter_mode: 
     print()
 
 
-def _analyze_memory(config: dict, profile_dir: Path, heap_files: list[Path]):
+def _analyze_memory(config: SpyglassConfig, profile_dir: Path, heap_files: list[Path]):
     """Memory profile analysis pipeline."""
     print(f"{BOLD}=== Analyze (Memory) ==={RESET}")
 
-    lighthouse_bin = cfg.lighthouse_binary(config)
+    lighthouse_bin = config.lighthouse_binary
 
     if not lighthouse_bin.exists():
         print(f"ERROR: Binary not found: {lighthouse_bin}", file=sys.stderr)
