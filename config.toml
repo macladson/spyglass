@@ -10,7 +10,8 @@ network = "mainnet"
 checkpoint_sync_url = "https://mainnet.checkpoint.sigp.io"
 # Extra flags passed to `lighthouse bn`
 extra_flags = ["--subscribe-all-subnets", "--import-all-attestations"]
-# Beacon API HTTP port (for epoch boundary detection)
+# Beacon API HTTP port. In managed mode this is passed to `lighthouse bn --http-port`.
+# In attach mode it's used to connect to the existing node's API.
 http_port = 5052
 # Prometheus metrics port
 metrics_port = 5054

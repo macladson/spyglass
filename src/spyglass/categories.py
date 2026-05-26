@@ -178,10 +178,12 @@ def format_category_report(result: dict, categories: list[dict]) -> str:
 
     # Coverage report
     categorized_pct = 100.0 - uncategorized_pct
-    lines.extend([
-        "",
-        f"**Coverage:** {categorized_pct:.1f}% of samples categorized",
-    ])
+    lines.extend(
+        [
+            "",
+            f"**Coverage:** {categorized_pct:.1f}% of samples categorized",
+        ]
+    )
 
     if uncategorized_pct > UNCATEGORIZED_WARNING_THRESHOLD * 100:
         lines.append(
@@ -191,13 +193,15 @@ def format_category_report(result: dict, categories: list[dict]) -> str:
 
     # Top uncategorized functions
     if uncategorized_leaves:
-        lines.extend([
-            "",
-            "### Uncategorized Top Functions",
-            "",
-            "| Function | % | Suggestion |",
-            "|----------|---|------------|",
-        ])
+        lines.extend(
+            [
+                "",
+                "### Uncategorized Top Functions",
+                "",
+                "| Function | % | Suggestion |",
+                "|----------|---|------------|",
+            ]
+        )
         for func, count in uncategorized_leaves.most_common(10):
             pct = 100.0 * count / total if total else 0
             suggestion = _suggest_category(func, categories)

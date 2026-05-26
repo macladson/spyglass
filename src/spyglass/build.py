@@ -11,13 +11,13 @@ from .constants import BOLD, RESET
 
 def cmd_build(config: SpyglassConfig, mode: str, verbose: bool = False):
     """Build Lighthouse with profiling instrumentation.
-    
+
     For CPU mode: builds with frame pointers enabled.
     For memory mode: builds with the release-profiling profile and jemalloc-profiling feature.
     For both: combines the above.
-    
+
     No file modifications are needed — everything is controlled via env vars and feature flags.
-    
+
     Args:
         config: Spyglass configuration object
         mode: "cpu", "memory", or "both"
@@ -39,10 +39,14 @@ def cmd_build(config: SpyglassConfig, mode: str, verbose: bool = False):
 
     # Build command
     build_cmd = [
-        "cargo", "build",
-        "--profile", profile,
-        "--bin", "lighthouse",
-        "--bin", "lcli",
+        "cargo",
+        "build",
+        "--profile",
+        profile,
+        "--bin",
+        "lighthouse",
+        "--bin",
+        "lcli",
     ]
 
     # Features
@@ -50,7 +54,7 @@ def cmd_build(config: SpyglassConfig, mode: str, verbose: bool = False):
     if do_disable_backfill:
         features.append("network/disable-backfill")
     if mode in ("memory", "both"):
-        features.append("jemalloc-profiling")
+        features.append("malloc_utils/jemalloc-profiling")
     if features:
         build_cmd.extend(["--features", ",".join(features)])
 
@@ -91,11 +95,11 @@ def cmd_build(config: SpyglassConfig, mode: str, verbose: bool = False):
 
 def _run_build_with_pty(build_cmd: list, cwd: Path, env: dict):
     """Run cargo build with a pty, showing only the progress bar line."""
+    import fcntl
     import pty
     import re
     import select
     import struct
-    import fcntl
     import termios
 
     # Create a pty so cargo renders its progress bar
@@ -148,7 +152,7 @@ def _run_build_with_pty(build_cmd: list, cwd: Path, env: dict):
                         pos = min(r_pos, n_pos)
 
                     line = buf[:pos].decode("utf-8", errors="replace")
-                    buf = buf[pos + 1:]
+                    buf = buf[pos + 1 :]
 
                     # Strip ANSI for matching, but display with ANSI intact
                     plain = ansi_re.sub("", line)

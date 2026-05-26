@@ -10,7 +10,7 @@ from pathlib import Path
 
 def load_epochs(output_dir: Path) -> list[dict]:
     """Load epoch boundary data from epochs.json.
-    
+
     Returns list of dicts with keys: epoch, slot, slot_start_time, detected_at.
     Falls back to legacy format (timestamp field) if slot_start_time is absent.
     """
@@ -28,7 +28,7 @@ def load_epochs(output_dir: Path) -> list[dict]:
 
 def load_sync_status(output_dir: Path) -> dict:
     """Load sync/timing status from run.json (or legacy sync_status.json).
-    
+
     Returns dict with keys: sync_complete_time, recording_start_time, genesis_time.
     """
     result = {}
@@ -49,13 +49,13 @@ def load_sync_status(output_dir: Path) -> dict:
     return result
 
 
-def _load_clock_offset(output_dir: Path) -> float | None:
+def load_clock_offset(output_dir: Path) -> float | None:
     """Load the precise wall-clock-to-monotonic offset from run.json.
-    
+
     The offset is: wall_clock - monotonic, captured simultaneously at recording start.
     This allows converting wall-clock epoch timestamps to perf's monotonic timestamps:
         perf_time = wall_clock_time - clock_offset
-    
+
     Returns None if run.json doesn't contain clock_offset.
     """
     run_json = output_dir / "run.json"
@@ -65,6 +65,35 @@ def _load_clock_offset(output_dir: Path) -> float | None:
     return run_info.get("clock_offset")
 
 
+def get_clock_offset(profile_dir: Path) -> float | None:
+    """Load or estimate the wall-to-monotonic clock offset for a profile directory.
+
+    Tries run.json first (precise), then falls back to estimating from the first
+    perf sample timestamp and recording_start_time.
+
+    Returns None if neither method succeeds.
+    """
+    offset = load_clock_offset(profile_dir)
+    if offset is not None:
+        return offset
+
+    perf_data = profile_dir / "perf.data"
+    if not perf_data.exists():
+        return None
+
+    sync_status = load_sync_status(profile_dir)
+    recording_start = sync_status.get("recording_start_time")
+    if recording_start is None:
+        return None
+
+    env = {**os.environ, "DEBUGINFOD_URLS": ""}
+    first_ts = get_first_perf_timestamp(perf_data, env)
+    if first_ts is None:
+        return None
+
+    return recording_start - first_ts
+
+
 def compute_time_ranges(
     output_dir: Path,
     filter_mode: str,
@@ -72,16 +101,16 @@ def compute_time_ranges(
     cooldown: float = 6.0,
 ) -> list[tuple[float, float]] | None:
     """Compute time ranges (wall-clock timestamps) to include for the given filter mode.
-    
+
     Uses slot_start_time from epochs.json for precise, genesis-derived epoch boundary
     times rather than SSE event arrival times.
-    
+
     Args:
         output_dir: Profile output directory containing epochs.json and sync_status.json
         filter_mode: One of "epoch-boundary", "mid-epoch", "steady-state", or "all"
         warmup: Seconds before epoch boundary to include
         cooldown: Seconds after epoch boundary to include
-    
+
     Returns:
         List of (start, end) time ranges to include, or None for "all" (no filtering).
     """
@@ -119,10 +148,10 @@ def compute_time_ranges(
 
         # Build the complement of boundary_ranges within [start_time, inf)
         # Sort and merge boundary ranges first
-        merged = _merge_ranges(boundary_ranges)
+        merged = merge_ranges(boundary_ranges)
         mid_ranges = []
         cursor = start_time
-        for (rs, re_) in merged:
+        for rs, re_ in merged:
             if cursor < rs:
                 mid_ranges.append((cursor, rs))
             cursor = max(cursor, re_)
@@ -133,7 +162,7 @@ def compute_time_ranges(
     return None
 
 
-def _merge_ranges(ranges: list[tuple[float, float]]) -> list[tuple[float, float]]:
+def merge_ranges(ranges: list[tuple[float, float]]) -> list[tuple[float, float]]:
     """Merge overlapping time ranges."""
     if not ranges:
         return []
@@ -154,14 +183,14 @@ def filter_collapsed_stacks(
     perf_data_path: Path,
 ) -> Path:
     """Filter a collapsed stacks file to only include samples within time ranges.
-    
+
     Since collapsed stacks don't have timestamps, we need to re-process from perf.data
     with timestamp filtering. This function runs perf script with time filtering
     and re-collapses.
-    
+
     Time ranges are in wall-clock (unix) time. They get converted to perf's monotonic
     clock using the clock_offset from run.json (captured precisely at recording start).
-    
+
     Args:
         fallback_path: Path to pre-collapsed stacks used when no filtering is needed.
         output_path: Where to write the filtered collapsed stacks.
@@ -174,32 +203,21 @@ def filter_collapsed_stacks(
             output_path.write_text(fallback_path.read_text())
         return output_path
 
-    # Get the precise clock offset (wall - monotonic)
-    clock_offset = _load_clock_offset(perf_data_path.parent)
-
+    clock_offset = get_clock_offset(perf_data_path.parent)
     if clock_offset is None:
-        # Fallback: estimate offset from first perf sample + recording_start_time
-        sync_status = load_sync_status(perf_data_path.parent)
-        recording_start = sync_status.get("recording_start_time")
-        env = {**os.environ, "DEBUGINFOD_URLS": ""}
-        first_ts = _get_first_perf_timestamp(perf_data_path, env)
-        if first_ts is None or recording_start is None:
-            print("  WARNING: Cannot determine clock offset, skipping filter")
-            if fallback_path != output_path:
-                output_path.write_text(fallback_path.read_text())
-            return output_path
-        clock_offset = recording_start - first_ts
-        print("  (using estimated clock offset — run.json missing clock_offset)")
-
-    env = {**os.environ, "DEBUGINFOD_URLS": ""}
+        print("  WARNING: Cannot determine clock offset, skipping filter")
+        if fallback_path != output_path:
+            output_path.write_text(fallback_path.read_text())
+        return output_path
 
     # Convert wall-clock ranges to monotonic (perf) time, then sort and merge
     perf_ranges = sorted(
         [(start - clock_offset, end - clock_offset) for start, end in time_ranges],
         key=lambda r: r[0],
     )
-    perf_ranges = _merge_ranges(perf_ranges)
+    perf_ranges = merge_ranges(perf_ranges)
 
+    env = {**os.environ, "DEBUGINFOD_URLS": ""}
     perf_proc = subprocess.Popen(
         ["perf", "script", "--no-inline", "-i", str(perf_data_path)],
         stdout=subprocess.PIPE,
@@ -215,7 +233,7 @@ def filter_collapsed_stacks(
     )
 
     # Process perf script output line by line, filtering by timestamp
-    _filter_perf_output(perf_proc.stdout, collapse_proc.stdin, perf_ranges)
+    filter_perf_output(perf_proc.stdout, collapse_proc.stdin, perf_ranges)
 
     collapse_proc.stdin.close()
     collapsed_data = collapse_proc.stdout.read()
@@ -226,8 +244,8 @@ def filter_collapsed_stacks(
     return output_path
 
 
-def _get_first_perf_timestamp(perf_data_path: Path, env: dict) -> float | None:
-    """Read the first timestamp from perf script output (legacy fallback)."""
+def get_first_perf_timestamp(perf_data_path: Path, env: dict) -> float | None:
+    """Read the first timestamp from perf script output."""
     proc = subprocess.Popen(
         ["perf", "script", "--no-inline", "-i", str(perf_data_path)],
         stdout=subprocess.PIPE,
@@ -246,17 +264,17 @@ def _get_first_perf_timestamp(perf_data_path: Path, env: dict) -> float | None:
     return None
 
 
-def _filter_perf_output(input_stream, output_stream, time_ranges):
+def filter_perf_output(input_stream, output_stream, time_ranges):
     """Filter perf script output, passing through only samples in time ranges.
-    
+
     perf script output format:
       command  pid  [cpu] timestamp: event
            addr symbol (dso)
            addr symbol (dso)
            <blank line>
-    
+
     We track timestamps and forward entire sample blocks if within range.
-    
+
     time_ranges must be sorted and non-overlapping for bisect to work correctly.
     """
     # Regex to match the header line of a sample (contains timestamp)
@@ -287,7 +305,7 @@ def _filter_perf_output(input_stream, output_stream, time_ranges):
             m = header_re.match(line)
             if m:
                 ts = float(m.group(1))
-                current_in_range = _in_ranges_bisect(ts, range_starts, range_ends)
+                current_in_range = in_ranges_bisect(ts, range_starts, range_ends)
 
         current_block.append(line)
 
@@ -298,13 +316,13 @@ def _filter_perf_output(input_stream, output_stream, time_ranges):
         output_stream.write(b"\n")
 
 
-def _in_ranges_bisect(
+def in_ranges_bisect(
     timestamp: float,
     range_starts: list[float],
     range_ends: list[float],
 ) -> bool:
     """Check if a timestamp falls within any range using binary search.
-    
+
     Requires ranges to be sorted and non-overlapping.
     O(log n) per lookup instead of O(n).
     """

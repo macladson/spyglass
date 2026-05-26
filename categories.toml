@@ -46,13 +46,7 @@ name = "Tracing/Logging"
 patterns = ["tracing", "logging"]
 
 [[categories]]
-name = "Fork Choice (locks)"
-# Matches fork_choice stacks where the leaf is in libc (futex/mutex wait)
-patterns = ["fork_choice"]
-leaf_patterns = ["[libc"]
-
-[[categories]]
-name = "Fork Choice (work)"
+name = "Fork Choice"
 patterns = ["fork_choice"]
 
 [[categories]]
@@ -76,8 +70,23 @@ name = "Networking/libp2p"
 patterns = ["libp2p", "gossipsub", "lighthouse_network"]
 
 [[categories]]
+name = "Block Import"
+patterns = [
+    "import_block",
+    "process_block",
+    "into_execution_pending_block",
+    "process_gossip_verified_block",
+    "send_gossip_beacon_block",
+    "send_chain_segment",
+    "block_verification",
+    "SignatureVerifiedBlock",
+    "ExecutionPendingBlock",
+    "per_block_processing",
+]
+
+[[categories]]
 name = "State Processing"
-patterns = ["state_processing", "per_epoch"]
+patterns = ["state_processing", "per_epoch", "state_advance_timer"]
 
 [[categories]]
 name = "Database"

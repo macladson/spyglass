@@ -4,18 +4,25 @@ import fcntl
 import json
 import os
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
-import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 
-from .config import SpyglassConfig, get_lighthouse_commit_hash
 from .beacon_api import BeaconApiPoller
-from .constants import SLOTS_PER_EPOCH, SECONDS_PER_SLOT, BOLD, RESET
-from .progress import RunProgress, PHASE_SYNCING, PHASE_SETTLING, PHASE_WAITING, PHASE_PROFILING, PHASE_DONE
+from .config import SpyglassConfig, get_lighthouse_commit_hash
+from .constants import BOLD, RESET, SLOTS_PER_EPOCH
+from .progress import (
+    PHASE_DONE,
+    PHASE_PROFILING,
+    PHASE_SETTLING,
+    PHASE_WAITING,
+    RunProgress,
+)
 
 
 def _check_required_tools(mode: str):
@@ -58,11 +65,11 @@ def _acquire_lock(lock_path: Path):
     except OSError:
         lock_file.close()
         print(
-            f"ERROR: Another spyglass process is already running in this output directory.",
+            "ERROR: Another spyglass process is already running in this output directory.",
             file=sys.stderr,
         )
         print(f"  Lock file: {lock_path}", file=sys.stderr)
-        print(f"  If no other process is running, remove the lock file and retry.", file=sys.stderr)
+        print("  If no other process is running, remove the lock file and retry.", file=sys.stderr)
         sys.exit(1)
     lock_file.write(str(os.getpid()))
     lock_file.flush()
@@ -84,6 +91,61 @@ def _release_lock(lock_file, lock_path: Path):
         pass
 
 
+def _pid_alive(pid: int) -> bool:
+    """Check if a process is still running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _find_lighthouse_pid(network: str, http_port: int) -> int | None:
+    """Find the PID of a running lighthouse beacon node via /proc.
+
+    Matches on process name 'lighthouse' with 'bn', the network name, and
+    the HTTP port. This uniquely identifies the instance even when multiple
+    lighthouse nodes run on the same network (e.g. stable vs unstable
+    side-by-side with different ports).
+
+    Returns None if not found or ambiguous.
+    """
+    matches = []
+    network_bytes = network.encode()
+    port_bytes = str(http_port).encode()
+    try:
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                comm = (entry / "comm").read_text().strip()
+                if comm != "lighthouse":
+                    continue
+                cmdline = (entry / "cmdline").read_bytes().split(b"\x00")
+                if b"bn" not in cmdline or network_bytes not in cmdline:
+                    continue
+                # Match --http-port <port>
+                if b"--http-port" in cmdline:
+                    try:
+                        idx = list(cmdline).index(b"--http-port")
+                        if cmdline[idx + 1] == port_bytes:
+                            matches.append(int(entry.name))
+                    except (IndexError, ValueError):
+                        continue
+                elif http_port == 5052:
+                    # Default port — matches if --http-port isn't specified
+                    matches.append(int(entry.name))
+            except (OSError, ValueError):
+                continue
+    except OSError:
+        pass
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
 def cmd_run(
     config: SpyglassConfig,
     mode: str,
@@ -92,11 +154,17 @@ def cmd_run(
     duration_override: int | None = None,
     epochs: int = 1,
     force: bool = False,
+    attach: bool = False,
+    attach_pid: int | None = None,
 ):
     """Run Lighthouse under profiling.
 
-    Starts lighthouse directly (no perf wrapper), waits for sync + settle,
+    In standard mode: starts mock-el + lighthouse, waits for sync + settle,
     then attaches perf at the start slot for precise profiling unit capture.
+
+    In attach mode: skips process startup and attaches to an existing lighthouse
+    process (resolved from --pid or the systemd service in config). Leaves the
+    process running after profiling.
 
     Args:
         config: Spyglass configuration object
@@ -105,16 +173,15 @@ def cmd_run(
         verbose: Show lighthouse/mock-el output
         duration_override: Safety timeout in seconds
         epochs: Number of epochs to capture
+        attach: Enable attach mode
+        attach_pid: PID of running lighthouse process (auto-resolved if omitted)
     """
+    attach_mode = attach
+
     output_dir = output_dir.resolve()
     lighthouse_dir = config.paths.lighthouse_dir
     perf_freq = config.profiling.perf_frequency
-    sync_url = config.lighthouse.checkpoint_sync_url
     network = config.lighthouse.network
-    flags = config.lighthouse.extra_flags
-    mel_addr = config.mock_el.listen_address
-    mel_port = config.mock_el.listen_port
-    http_port = config.lighthouse.http_port
     metrics_port = config.lighthouse.metrics_port
 
     effective_timeout = duration_override or 7200
@@ -122,16 +189,32 @@ def cmd_run(
     start_slot = config.profiling.start_slot
     end_slot = config.profiling.end_slot
 
-    lighthouse_bin = config.lighthouse_binary
-    lcli_bin = config.lcli_binary
-
-    if not lighthouse_bin.exists():
-        print(f"ERROR: Binary not found: {lighthouse_bin}", file=sys.stderr)
-        print("  Run `spyglass build` first.", file=sys.stderr)
-        sys.exit(1)
-    if not lcli_bin.exists():
-        print(f"ERROR: lcli not found: {lcli_bin}", file=sys.stderr)
-        sys.exit(1)
+    if attach_mode:
+        if attach_pid is None:
+            http_port = config.lighthouse.http_port
+            attach_pid = _find_lighthouse_pid(network, http_port)
+            if attach_pid is None:
+                print(
+                    f"ERROR: Could not find a running lighthouse bn"
+                    f" (network={network}, http-port={http_port})",
+                    file=sys.stderr,
+                )
+                print("  Provide --pid explicitly, or check network/http_port in config.", file=sys.stderr)
+                sys.exit(1)
+            print(f"  Found lighthouse bn ({network}, port {http_port}) at PID {attach_pid}")
+        if not _pid_alive(attach_pid):
+            print(f"ERROR: PID {attach_pid} not found", file=sys.stderr)
+            sys.exit(1)
+    else:
+        lighthouse_bin = config.lighthouse_binary
+        lcli_bin = config.lcli_binary
+        if not lighthouse_bin.exists():
+            print(f"ERROR: Binary not found: {lighthouse_bin}", file=sys.stderr)
+            print("  Run `spyglass build` first.", file=sys.stderr)
+            sys.exit(1)
+        if not lcli_bin.exists():
+            print(f"ERROR: lcli not found: {lcli_bin}", file=sys.stderr)
+            sys.exit(1)
 
     _check_required_tools(mode)
 
@@ -140,14 +223,21 @@ def cmd_run(
     print(f"  {BOLD}Network:{RESET}  {network}")
     print(f"  {BOLD}Target:{RESET}   {epochs} epoch(s) (timeout: {effective_timeout}s)")
     print(f"  {BOLD}Output:{RESET}   {output_dir}")
-    print(f"  {BOLD}Binary:{RESET}   {lighthouse_bin}")
+    if attach_mode:
+        print(f"  {BOLD}Attach:{RESET}   PID {attach_pid}")
+        print(f"  {BOLD}Beacon:{RESET}   {config.lighthouse.beacon_url}")
+    else:
+        print(f"  {BOLD}Binary:{RESET}   {lighthouse_bin}")
     print()
 
     # Setup output directory
     if output_dir.exists() and any(output_dir.iterdir()):
         if not force:
-            print(f"ERROR: Output directory already exists and is not empty: {output_dir}", file=sys.stderr)
-            print(f"  Use --force to overwrite.", file=sys.stderr)
+            print(
+                f"ERROR: Output directory already exists and is not empty: {output_dir}",
+                file=sys.stderr,
+            )
+            print("  Use --force to overwrite.", file=sys.stderr)
             sys.exit(1)
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -155,29 +245,43 @@ def cmd_run(
     lock_path = output_dir / ".spyglass.lock"
     lock_file = _acquire_lock(lock_path)
 
-    datadir = output_dir / "datadir"
-    datadir.mkdir(parents=True, exist_ok=True)
+    # In standard mode, start mock-el and lighthouse
+    mock_el_proc = None
+    lighthouse_proc = None
 
-    jwt_path = datadir / "jwt.hex"
-    generate_jwt(jwt_path)
+    if not attach_mode:
+        sync_url = config.lighthouse.checkpoint_sync_url
+        flags = config.lighthouse.extra_flags
+        mel_addr = config.mock_el.listen_address
+        mel_port = config.mock_el.listen_port
+        http_port = config.lighthouse.http_port
 
-    # Start mock-el
-    mock_el_cmd = [
-        str(lcli_bin),
-        "--network", network,
-        "mock-el",
-        "--all-payloads-valid", "true",
-        "--jwt-output-path", str(jwt_path),
-        "--listen-address", mel_addr,
-        "--listen-port", str(mel_port),
-    ]
-    print(f"  Starting mock-el on {mel_addr}:{mel_port}...")
+        datadir = output_dir / "datadir"
+        datadir.mkdir(parents=True, exist_ok=True)
 
-    devnull = None if verbose else subprocess.DEVNULL
-    mock_el_proc = subprocess.Popen(mock_el_cmd, stdout=devnull, stderr=devnull)
+        jwt_path = datadir / "jwt.hex"
+        generate_jwt(jwt_path)
+
+        mock_el_cmd = [
+            str(lcli_bin),
+            "--network",
+            network,
+            "mock-el",
+            "--all-payloads-valid",
+            "true",
+            "--jwt-output-path",
+            str(jwt_path),
+            "--listen-address",
+            mel_addr,
+            "--listen-port",
+            str(mel_port),
+        ]
+        print(f"  Starting mock-el on {mel_addr}:{mel_port}...")
+
+        devnull = None if verbose else subprocess.DEVNULL
+        mock_el_proc = subprocess.Popen(mock_el_cmd, stdout=devnull, stderr=devnull)
 
     # Process tracking
-    lighthouse_proc = None
     perf_proc = None
     beacon_poller = None
     progress = None
@@ -201,72 +305,99 @@ def cmd_run(
                 perf_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 perf_proc.kill()
-        if lighthouse_proc and lighthouse_proc.poll() is None:
-            lighthouse_proc.terminate()
-            try:
-                lighthouse_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                lighthouse_proc.kill()
-        if mock_el_proc.poll() is None:
-            mock_el_proc.terminate()
-            try:
-                mock_el_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                mock_el_proc.kill()
+        if not attach_mode:
+            if lighthouse_proc and lighthouse_proc.poll() is None:
+                lighthouse_proc.terminate()
+                try:
+                    lighthouse_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    lighthouse_proc.kill()
+            if mock_el_proc and mock_el_proc.poll() is None:
+                mock_el_proc.terminate()
+                try:
+                    mock_el_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    mock_el_proc.kill()
 
-    prev_sigint = signal.getsignal(signal.SIGINT)
-    prev_sigterm = signal.getsignal(signal.SIGTERM)
-    signal.signal(signal.SIGINT, cleanup)
-    signal.signal(signal.SIGTERM, cleanup)
+    # Only register signal handlers from the main thread
+    _in_main_thread = threading.current_thread() is threading.main_thread()
+    prev_sigint = None
+    prev_sigterm = None
+    if _in_main_thread:
+        prev_sigint = signal.getsignal(signal.SIGINT)
+        prev_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGINT, cleanup)
+        signal.signal(signal.SIGTERM, cleanup)
+
+    # Target PID for perf and liveness checks
+    target_pid = attach_pid if attach_mode else None
+
+    def target_alive() -> bool:
+        if attach_mode:
+            return _pid_alive(attach_pid)
+        return lighthouse_proc is not None and lighthouse_proc.poll() is None
 
     try:
-        # Wait for mock-el
-        if not wait_for_port(mel_addr, mel_port):
-            print("ERROR: mock-el did not start within 5 seconds", file=sys.stderr)
-            cleanup()
-            sys.exit(1)
-        print("  mock-el ready.")
+        if not attach_mode:
+            # Wait for mock-el
+            if not wait_for_port(mel_addr, mel_port):
+                print("ERROR: mock-el did not start within 5 seconds", file=sys.stderr)
+                cleanup()
+                sys.exit(1)
+            print("  mock-el ready.")
 
-        # Build lighthouse command (no perf wrapper)
-        execution_endpoint = f"http://{mel_addr}:{mel_port}"
-        bn_args = [
-            str(lighthouse_bin), "bn",
-            "--network", network,
-            "--execution-endpoint", execution_endpoint,
-            "--execution-jwt", str(jwt_path),
-            "--datadir", str(datadir),
-            "--purge-db-force",
-            "--checkpoint-sync-url", sync_url,
-            "--http",
-            "--http-port", str(http_port),
-            "--metrics",
-            "--metrics-port", str(metrics_port),
-        ]
-        bn_args.extend(flags)
+            # Build lighthouse command (no perf wrapper)
+            execution_endpoint = f"http://{mel_addr}:{mel_port}"
+            bn_args = [
+                str(lighthouse_bin),
+                "bn",
+                "--network",
+                network,
+                "--execution-endpoint",
+                execution_endpoint,
+                "--execution-jwt",
+                str(jwt_path),
+                "--datadir",
+                str(datadir),
+                "--purge-db-force",
+                "--checkpoint-sync-url",
+                sync_url,
+                "--http",
+                "--http-port",
+                str(http_port),
+                "--metrics",
+                "--metrics-port",
+                str(metrics_port),
+            ]
+            bn_args.extend(flags)
 
-        # Environment for memory profiling
-        env = os.environ.copy()
-        if mode == "memory":
-            heap_prefix = output_dir / "heap"
-            env["_RJEM_MALLOC_CONF"] = (
-                f"prof_active:true,prof_final:true,prof_prefix:{heap_prefix}"
+            env = os.environ.copy()
+            if mode == "memory":
+                heap_prefix = output_dir / "heap"
+                env["_RJEM_MALLOC_CONF"] = (
+                    f"prof_active:true,prof_final:true,prof_prefix:{heap_prefix}"
+                )
+
+            if not verbose:
+                print("  (logs silenced, use --verbose to see them)")
+            print()
+
+            lh_stdout = None if verbose else subprocess.DEVNULL
+            lh_stderr = None if verbose else subprocess.DEVNULL
+            lighthouse_proc = subprocess.Popen(
+                bn_args, env=env, stdout=lh_stdout, stderr=lh_stderr
             )
-
-        if not verbose:
-            print("  (logs silenced, use --verbose to see them)")
-        print()
-
-        # Start lighthouse directly
-        lh_stdout = None if verbose else subprocess.DEVNULL
-        lh_stderr = None if verbose else subprocess.DEVNULL
-        lighthouse_proc = subprocess.Popen(bn_args, env=env, stdout=lh_stdout, stderr=lh_stderr)
+            target_pid = lighthouse_proc.pid
 
         # Start beacon poller
-        beacon_url = f"http://127.0.0.1:{http_port}"
+        effective_beacon_url = (
+            config.lighthouse.beacon_url if attach_mode else f"http://127.0.0.1:{http_port}"
+        )
         warmup = config.filtering.epoch_boundary_warmup
         cooldown = config.filtering.epoch_boundary_cooldown
         beacon_poller = BeaconApiPoller(
-            beacon_url, output_dir,
+            effective_beacon_url,
+            output_dir,
             poll_interval=3.0,
             metrics_port=metrics_port,
             epoch_warmup=warmup,
@@ -280,52 +411,70 @@ def cmd_run(
         progress = RunProgress(
             beacon_poller,
             watch_file=perf_data,
-            start_slot_offset=start_slot,
-            end_slot_offset=end_slot,
+            start_slot=start_slot,
+            end_slot=end_slot,
             epochs=epochs,
         )
         progress.start()
 
         # === Phase 1: Wait for sync ===
         deadline = time.time() + effective_timeout
-        while time.time() < deadline and lighthouse_proc.poll() is None:
+        while time.time() < deadline and target_alive():
             if beacon_poller.state.sync_complete_time is not None:
                 break
             time.sleep(1.0)
         else:
-            if lighthouse_proc.poll() is not None:
-                print(f"\n  ERROR: Lighthouse exited during sync (code {lighthouse_proc.returncode})")
-                sys.exit(1)
+            if not target_alive():
+                print("\n  ERROR: Lighthouse process exited during sync")
+            else:
+                print(f"\n  ERROR: Timed out waiting for sync ({effective_timeout}s)")
+            cleanup()
+            sys.exit(1)
 
         # === Phase 2: Wait for settle ===
         progress.set_phase(PHASE_SETTLING)
-        while time.time() < deadline and lighthouse_proc.poll() is None:
-            if beacon_poller._settled:
+        while time.time() < deadline and target_alive():
+            if beacon_poller.settled:
                 break
             time.sleep(1.0)
+        else:
+            if not target_alive():
+                print("\n  ERROR: Lighthouse process exited during settle")
+            else:
+                print(f"\n  ERROR: Timed out waiting for settle ({effective_timeout}s)")
+            cleanup()
+            sys.exit(1)
 
         # === Phase 3: Wait for start slot ===
-        # If we're already past start_slot in this epoch, wait for the next one.
         progress.set_phase(PHASE_WAITING)
         slot = beacon_poller.state.last_slot
         if slot is not None and (slot % SLOTS_PER_EPOCH) >= start_slot:
-            # Wait until we enter the next epoch
             wait_for_epoch = (slot // SLOTS_PER_EPOCH) + 1
-            while time.time() < deadline and lighthouse_proc.poll() is None:
+            while time.time() < deadline and target_alive():
                 slot = beacon_poller.state.last_slot
                 if slot is not None and (slot // SLOTS_PER_EPOCH) >= wait_for_epoch:
                     break
                 time.sleep(1.0)
 
-        # Now wait for start_slot within the current epoch
-        while time.time() < deadline and lighthouse_proc.poll() is None:
+        while time.time() < deadline and target_alive():
             slot = beacon_poller.state.last_slot
             if slot is not None:
                 if (slot % SLOTS_PER_EPOCH) >= start_slot:
                     break
             time.sleep(1.0)
 
+        if not target_alive():
+            print("\n  ERROR: Lighthouse process exited while waiting for start slot")
+            cleanup()
+            sys.exit(1)
+        if time.time() >= deadline:
+            print(f"\n  ERROR: Timed out waiting for start slot ({effective_timeout}s)")
+            cleanup()
+            sys.exit(1)
+
         # === Phase 4: Attach profiler ===
+        beacon_poller.enable_tracking()
+
         progress.set_phase(PHASE_PROFILING)
         recording_start = time.time()
         recording_start_monotonic = time.monotonic()
@@ -333,26 +482,28 @@ def cmd_run(
         if mode == "cpu":
             perf_proc = subprocess.Popen(
                 [
-                    "perf", "record", "-g",
-                    "-F", str(perf_freq),
-                    "-p", str(lighthouse_proc.pid),
-                    "-o", str(perf_data),
+                    "perf",
+                    "record",
+                    "-g",
+                    "-F",
+                    str(perf_freq),
+                    "-p",
+                    str(target_pid),
+                    "-o",
+                    str(perf_data),
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            # Brief pause to let perf attach
             time.sleep(0.1)
 
         # === Wait for epoch capture + end slot ===
-        # First wait for the epoch boundary to be captured
-        while time.time() < deadline and lighthouse_proc.poll() is None:
+        while time.time() < deadline and target_alive():
             if beacon_poller.target_reached.is_set():
                 break
             time.sleep(1.0)
 
-        # Then wait until we reach the end slot of the profiling unit
-        while time.time() < deadline and lighthouse_proc.poll() is None:
+        while time.time() < deadline and target_alive():
             slot = beacon_poller.state.last_slot
             if slot is not None:
                 slot_in_epoch = slot % SLOTS_PER_EPOCH
@@ -361,6 +512,15 @@ def cmd_run(
             time.sleep(1.0)
 
         recording_end = time.time()
+
+        if not target_alive():
+            print("\n  ERROR: Lighthouse process exited during profiling")
+            cleanup()
+            sys.exit(1)
+        if time.time() >= deadline:
+            print(f"\n  ERROR: Timed out during profiling ({effective_timeout}s)")
+            cleanup()
+            sys.exit(1)
 
         # === Phase 5: Stop profiler ===
         progress.set_phase(PHASE_DONE)
@@ -371,19 +531,20 @@ def cmd_run(
             except subprocess.TimeoutExpired:
                 perf_proc.kill()
 
-        # Terminate lighthouse
-        if lighthouse_proc.poll() is None:
-            lighthouse_proc.terminate()
-            try:
-                lighthouse_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                lighthouse_proc.kill()
+        if not attach_mode:
+            if lighthouse_proc and lighthouse_proc.poll() is None:
+                lighthouse_proc.terminate()
+                try:
+                    lighthouse_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    lighthouse_proc.kill()
 
     finally:
         cleanup()
         _release_lock(lock_file, lock_path)
-        signal.signal(signal.SIGINT, prev_sigint)
-        signal.signal(signal.SIGTERM, prev_sigterm)
+        if _in_main_thread:
+            signal.signal(signal.SIGINT, prev_sigint)
+            signal.signal(signal.SIGTERM, prev_sigterm)
         if _signal_received:
             sys.exit(0)
 
@@ -400,18 +561,24 @@ def cmd_run(
         "recording_start": recording_start,
         "recording_start_monotonic": recording_start_monotonic,
         "clock_offset": clock_offset,
-        "genesis_time": beacon_poller._genesis_time,
+        "genesis_time": beacon_poller.genesis_time,
         "sync_complete_time": beacon_poller.state.sync_complete_time,
         "build_profile": config.profiling.profile,
         "perf_frequency": perf_freq,
-        "lighthouse_dir": str(lighthouse_dir),
-        "lighthouse_bin": str(lighthouse_bin),
-        "lighthouse_commit": get_lighthouse_commit_hash(config),
-        "checkpoint_sync_url": sync_url,
-        "extra_flags": flags,
-        "mock_el": f"{mel_addr}:{mel_port}",
         "pr": config.pr_number,
     }
+    if attach_mode:
+        run_info["attach_pid"] = attach_pid
+        run_info["lighthouse_bin"] = "attached"
+        run_info["lighthouse_dir"] = None
+        run_info["lighthouse_commit"] = None
+    else:
+        run_info["lighthouse_dir"] = str(lighthouse_dir)
+        run_info["lighthouse_bin"] = str(lighthouse_bin)
+        run_info["lighthouse_commit"] = get_lighthouse_commit_hash(config)
+        run_info["checkpoint_sync_url"] = config.lighthouse.checkpoint_sync_url
+        run_info["extra_flags"] = config.lighthouse.extra_flags
+        run_info["mock_el"] = f"{config.mock_el.listen_address}:{config.mock_el.listen_port}"
     (output_dir / "run.json").write_text(json.dumps(run_info, indent=2))
 
     # Clear progress line and print summary

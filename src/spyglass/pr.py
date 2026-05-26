@@ -9,7 +9,9 @@ CHECKOUTS_DIR = "checkouts"
 LIGHTHOUSE_REPO = "https://github.com/sigp/lighthouse.git"
 
 
-def _run_git(args: list[str], cwd: Path | None, verbose: bool, error_msg: str) -> subprocess.CompletedProcess:
+def _run_git(
+    args: list[str], cwd: Path | None, verbose: bool, error_msg: str
+) -> subprocess.CompletedProcess:
     """Run a git command, exiting with an error message on failure."""
     stdout_dest = None if verbose else subprocess.PIPE
     stderr_dest = None if verbose else subprocess.PIPE
@@ -24,15 +26,15 @@ def _run_git(args: list[str], cwd: Path | None, verbose: bool, error_msg: str) -
 
 def fetch_pr(config, pr_number: int, verbose: bool = False) -> Path:
     """Fetch a PR from sigp/lighthouse via shallow clone.
-    
+
     Clones into <project_root>/checkouts/pr-<number>/.
     If the directory already exists, fetches the latest and resets.
-    
+
     Args:
         config: Spyglass configuration object
         pr_number: GitHub PR number
         verbose: Show git output
-        
+
     Returns:
         Path to the checkout directory (to be used as lighthouse_dir for building)
     """
@@ -43,22 +45,19 @@ def fetch_pr(config, pr_number: int, verbose: bool = False) -> Path:
     print(f"=== Fetch PR #{pr_number} ===")
 
     if checkout_path.exists():
-        # Already cloned — fetch latest
+        # Already cloned — fetch latest and reset
         print(f"  Updating existing checkout at {checkout_path}...")
         _run_git(
-            ["git", "fetch", "origin", f"pull/{pr_number}/head:pr-{pr_number}"],
-            cwd=checkout_path, verbose=verbose,
+            ["git", "fetch", "origin", f"pull/{pr_number}/head"],
+            cwd=checkout_path,
+            verbose=verbose,
             error_msg=f"Failed to fetch PR #{pr_number}",
         )
         _run_git(
-            ["git", "checkout", f"pr-{pr_number}"],
-            cwd=checkout_path, verbose=verbose,
-            error_msg=f"Failed to checkout pr-{pr_number}",
-        )
-        _run_git(
-            ["git", "reset", "--hard", f"pr-{pr_number}"],
-            cwd=checkout_path, verbose=verbose,
-            error_msg=f"Failed to reset to pr-{pr_number}",
+            ["git", "reset", "--hard", "FETCH_HEAD"],
+            cwd=checkout_path,
+            verbose=verbose,
+            error_msg=f"Failed to reset to PR #{pr_number}",
         )
     else:
         # Fresh clone — shallow single-branch clone, then fetch just this PR
@@ -67,7 +66,8 @@ def fetch_pr(config, pr_number: int, verbose: bool = False) -> Path:
 
         _run_git(
             ["git", "clone", "--depth", "1", LIGHTHOUSE_REPO, str(checkout_path)],
-            cwd=None, verbose=verbose,
+            cwd=None,
+            verbose=verbose,
             error_msg="Failed to clone repository",
         )
 
@@ -75,14 +75,16 @@ def fetch_pr(config, pr_number: int, verbose: bool = False) -> Path:
         print(f"  Fetching pull/{pr_number}/head...")
         _run_git(
             ["git", "fetch", "origin", f"pull/{pr_number}/head:pr-{pr_number}"],
-            cwd=checkout_path, verbose=verbose,
+            cwd=checkout_path,
+            verbose=verbose,
             error_msg=f"Failed to fetch PR #{pr_number}",
         )
 
         # Checkout the PR branch
         _run_git(
             ["git", "checkout", f"pr-{pr_number}"],
-            cwd=checkout_path, verbose=verbose,
+            cwd=checkout_path,
+            verbose=verbose,
             error_msg=f"Failed to checkout pr-{pr_number}",
         )
 
@@ -90,7 +92,8 @@ def fetch_pr(config, pr_number: int, verbose: bool = False) -> Path:
     result = subprocess.run(
         ["git", "--no-pager", "log", "--oneline", "-1"],
         cwd=checkout_path,
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode == 0:
         print(f"  HEAD: {result.stdout.strip()}")

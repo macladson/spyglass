@@ -134,6 +134,45 @@ spyglass clean all          # Remove checkouts + profiles
 spyglass clean profiles     # Remove only profiling results
 ```
 
+### `run --attach`
+
+Attach to an already-running Lighthouse node instead of building and managing the runtime. Spyglass finds the process automatically by scanning `/proc` for a `lighthouse bn` process matching the `network` and `http_port` in your config.
+
+```bash
+# Attach to the local lighthouse bn (auto-detected from config)
+spyglass run --mode cpu --attach -n my-profile
+
+# Explicit PID if auto-detection can't disambiguate
+spyglass run --mode cpu --attach --pid 12345 -n my-profile
+```
+
+After profiling completes, the lighthouse process is left running — spyglass only detaches `perf`.
+
+#### Side-by-side profiling (stable vs unstable)
+
+When running two lighthouse instances on the same network (e.g. for A/B comparison), use separate configs with different `http_port` values to distinguish them:
+
+```toml
+# config-stable.toml
+[lighthouse]
+http_port = 5052
+
+# config-unstable.toml
+[lighthouse]
+http_port = 5053
+```
+
+```bash
+# Each command finds the right process by matching http_port
+spyglass run --mode cpu --attach -c config-stable.toml -n stable --epochs 3
+spyglass run --mode cpu --attach -c config-unstable.toml -n unstable --epochs 3
+
+# Compare
+spyglass analyze ./profiles/stable/cpu --filter epoch-boundary
+spyglass analyze ./profiles/unstable/cpu --filter epoch-boundary
+spyglass compare ./profiles/stable/cpu ./profiles/unstable/cpu --filter epoch-boundary
+```
+
 ### Profiling a GitHub PR
 
 Fetch and profile a pull request directly from `sigp/lighthouse`:

@@ -1,6 +1,7 @@
 """Cleanup commands for spyglass artifacts."""
 
 import shutil
+import sys
 from pathlib import Path
 
 from .config import SpyglassConfig
@@ -10,7 +11,7 @@ from .pr import CHECKOUTS_DIR
 
 def cmd_clean(config: SpyglassConfig, what: str = "all", verbose: bool = False):
     """Remove spyglass artifacts.
-    
+
     Args:
         config: Spyglass configuration object
         what: What to clean — "all", "checkouts", or "profiles"
@@ -40,7 +41,10 @@ def cmd_clean(config: SpyglassConfig, what: str = "all", verbose: bool = False):
                 print(f"  Removing {path} ({format_size(size)})...")
             else:
                 print(f"  Removing {name}/ ({format_size(size)})")
-            shutil.rmtree(path)
+            try:
+                shutil.rmtree(path)
+            except OSError as e:
+                print(f"  WARNING: Failed to remove {path}: {e}", file=sys.stderr)
         else:
             print(f"  {name}/ — not found, skipping")
 
@@ -55,6 +59,3 @@ def _dir_size(path: Path) -> int:
         if f.is_file():
             total += f.stat().st_size
     return total
-
-
-

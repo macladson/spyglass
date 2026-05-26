@@ -8,10 +8,10 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from .categories import load_categories, categorize_sample
+from .categories import categorize_sample, load_categories
 from .config import SpyglassConfig
 from .constants import BOLD, RESET
-from .filters import load_epochs, load_sync_status, _load_clock_offset, _get_first_perf_timestamp
+from .filters import get_clock_offset, load_epochs
 
 
 def cmd_flamechart(
@@ -54,16 +54,10 @@ def cmd_flamechart(
     print()
 
     # Compute clock offset
-    clock_offset = _load_clock_offset(profile_dir)
+    clock_offset = get_clock_offset(profile_dir)
     if clock_offset is None:
-        sync_status = load_sync_status(profile_dir)
-        recording_start = sync_status.get("recording_start_time")
-        env = {**os.environ, "DEBUGINFOD_URLS": ""}
-        first_ts = _get_first_perf_timestamp(perf_data, env)
-        if first_ts is None or recording_start is None:
-            print("ERROR: Cannot determine clock offset", file=sys.stderr)
-            sys.exit(1)
-        clock_offset = recording_start - first_ts
+        print("ERROR: Cannot determine clock offset", file=sys.stderr)
+        sys.exit(1)
 
     # Build time ranges for each epoch boundary (in perf monotonic time)
     boundary_windows = []
@@ -73,30 +67,42 @@ def cmd_flamechart(
         wall_end = boundary_time + cooldown
         perf_start = wall_start - clock_offset
         perf_end = wall_end - clock_offset
-        boundary_windows.append({
-            "epoch": epoch["epoch"],
-            "boundary_time": boundary_time,
-            "perf_start": perf_start,
-            "perf_end": perf_end,
-            "perf_boundary": boundary_time - clock_offset,
-        })
+        boundary_windows.append(
+            {
+                "epoch": epoch["epoch"],
+                "boundary_time": boundary_time,
+                "perf_start": perf_start,
+                "perf_end": perf_end,
+                "perf_boundary": boundary_time - clock_offset,
+            }
+        )
 
     # Compute bins
     num_bins = int(window / bin_size)
     print(f"  Bins: {num_bins} × {bin_size}s")
 
     # Process perf script output, binning samples
-    print(f"  Processing perf.data...")
-    bins_data = _process_perf_into_bins(
-        perf_data, boundary_windows, num_bins, bin_size, verbose
-    )
+    print("  Processing perf.data...")
+    bins_data = _process_perf_into_bins(perf_data, boundary_windows, num_bins, bin_size, verbose)
 
     # Category analysis per bin
     categories = load_categories()
     bins_categories = None
     if categories:
-        print(f"  Categorizing samples per bin...")
+        print("  Categorizing samples per bin...")
         bins_categories = _categorize_bins(bins_data, categories)
+
+    # Load metadata from run.json
+    perf_frequency = None
+    pr_number = None
+    run_json_path = profile_dir / "run.json"
+    if run_json_path.exists():
+        run_info = json.loads(run_json_path.read_text())
+        perf_frequency = run_info.get("perf_frequency")
+        pr_number = run_info.get("pr")
+
+    # Derive nickname from directory structure: profiles/<nickname>/<mode>/
+    nickname = profile_dir.parent.name
 
     # Generate HTML
     view_dir = profile_dir / "views" / "epoch_boundary"
@@ -104,9 +110,17 @@ def cmd_flamechart(
     output_path = view_dir / "flamechart.html"
     print(f"  Generating {output_path.name}...")
     _generate_html(
-        output_path, bins_data, bins_categories, categories,
-        bin_size=bin_size, warmup=warmup, cooldown=cooldown,
+        output_path,
+        bins_data,
+        bins_categories,
+        categories,
+        bin_size=bin_size,
+        warmup=warmup,
+        cooldown=cooldown,
         epochs=epochs,
+        perf_frequency=perf_frequency,
+        nickname=nickname,
+        pr_number=pr_number,
     )
 
     print(f"\n{BOLD}=== Flame chart complete ==={RESET}")
@@ -243,6 +257,9 @@ def _generate_html(
     warmup: float,
     cooldown: float,
     epochs: list[dict],
+    perf_frequency: int | None = None,
+    nickname: str | None = None,
+    pr_number: int | None = None,
 ):
     """Generate a self-contained HTML flame chart visualization."""
     num_bins = len(bins_data)
@@ -273,14 +290,16 @@ def _generate_html(
             for cat_name, count in cat_data["category_counts"].items():
                 cat_breakdown[cat_name] = round(100.0 * count / total, 2) if total else 0
 
-        bins_json.append({
-            "index": i,
-            "t_start": round(t_start, 2),
-            "t_end": round(t_end, 2),
-            "total_samples": total,
-            "top_functions": top_funcs,
-            "categories": cat_breakdown,
-        })
+        bins_json.append(
+            {
+                "index": i,
+                "t_start": round(t_start, 2),
+                "t_end": round(t_end, 2),
+                "total_samples": total,
+                "top_functions": top_funcs,
+                "categories": cat_breakdown,
+            }
+        )
 
     # Prepare collapsed stacks per bin for d3-flame-graph
     bins_collapsed = []
@@ -296,26 +315,48 @@ def _generate_html(
     cat_patterns = []
     if categories:
         for cat in categories:
-            cat_patterns.append({
-                "name": cat["name"],
-                "patterns": [p for p in cat.get("patterns", []) if not p.startswith("re:")],
-                "regex_patterns": [p[3:] for p in cat.get("patterns", []) if p.startswith("re:")],
-                "leaf_patterns": [p for p in cat.get("leaf_patterns", []) if not p.startswith("re:")],
-            })
-        cat_patterns.append({"name": "Uncategorized", "patterns": [], "regex_patterns": [], "leaf_patterns": []})
+            cat_patterns.append(
+                {
+                    "name": cat["name"],
+                    "patterns": [p for p in cat.get("patterns", []) if not p.startswith("re:")],
+                    "regex_patterns": [
+                        p[3:] for p in cat.get("patterns", []) if p.startswith("re:")
+                    ],
+                    "leaf_patterns": [
+                        p for p in cat.get("leaf_patterns", []) if not p.startswith("re:")
+                    ],
+                }
+            )
+        cat_patterns.append(
+            {"name": "Uncategorized", "patterns": [], "regex_patterns": [], "leaf_patterns": []}
+        )
 
     # Category colors
     cat_colors = [
-        "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
-        "#42d4f4", "#f032e6", "#bfef45", "#fabed4", "#469990",
-        "#dcbeff", "#9A6324", "#fffac8", "#800000", "#aaffc3",
+        "#e6194b",
+        "#3cb44b",
+        "#4363d8",
+        "#f58231",
+        "#911eb4",
+        "#42d4f4",
+        "#f032e6",
+        "#bfef45",
+        "#fabed4",
+        "#469990",
+        "#dcbeff",
+        "#9A6324",
+        "#fffac8",
+        "#800000",
+        "#aaffc3",
     ]
+
+    max_samples = max((sum(b.values()) for b in bins_data), default=0)
 
     data = {
         "bins": bins_json,
         "bins_collapsed": bins_collapsed,
         "category_names": cat_names,
-        "category_colors": cat_colors[:len(cat_names)],
+        "category_colors": cat_colors[: len(cat_names)],
         "category_patterns": cat_patterns,
         "bin_size": bin_size,
         "warmup": warmup,
@@ -323,6 +364,10 @@ def _generate_html(
         "window": window,
         "num_bins": num_bins,
         "epochs": [{"epoch": e["epoch"], "slot": e["slot"]} for e in epochs],
+        "max_samples": max_samples,
+        "perf_frequency": perf_frequency,
+        "nickname": nickname,
+        "pr_number": pr_number,
     }
 
     html = _HTML_TEMPLATE.replace("/*DATA_PLACEHOLDER*/", json.dumps(data))
@@ -343,8 +388,9 @@ h1 { font-size: 1.4em; margin-bottom: 10px; color: #fff; }
 .container { max-width: 1400px; margin: 0 auto; }
 
 /* Timeline */
-.timeline { position: relative; height: 200px; margin-bottom: 20px; background: #16213e; border-radius: 8px; padding: 10px; }
+.timeline { position: relative; height: 200px; margin-bottom: 20px; background: #16213e; border-radius: 8px; padding: 10px 10px 10px 60px; }
 .timeline-title { font-size: 0.8em; color: #888; margin-bottom: 5px; }
+.y-axis { position: absolute; left: 6px; top: 28px; bottom: 30px; width: 48px; display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; padding-right: 4px; font-size: 0.6em; color: #666; }
 .stacked-chart { position: relative; height: 150px; display: flex; align-items: end; gap: 1px; }
 .bin-bar { display: flex; flex-direction: column-reverse; flex: 1; cursor: pointer; border-radius: 2px 2px 0 0; overflow: hidden; opacity: 0.8; transition: opacity 0.1s; }
 .bin-bar:hover, .bin-bar.active { opacity: 1; }
@@ -354,9 +400,13 @@ h1 { font-size: 1.4em; margin-bottom: 10px; color: #fff; }
 .time-axis { display: flex; justify-content: space-between; font-size: 0.7em; color: #666; margin-top: 4px; }
 
 /* Slider */
-.slider-container { margin-bottom: 20px; }
+.slider-container { margin-bottom: 20px; padding-left: 60px; }
 .slider-container input[type=range] { width: 100%; cursor: pointer; }
 .slider-label { display: flex; justify-content: space-between; font-size: 0.8em; color: #888; }
+
+/* Units toggle */
+.units-toggle { font-size: 0.75em; color: #888; cursor: pointer; padding: 3px 8px; border: 1px solid #444; border-radius: 3px; background: none; transition: all 0.1s; }
+.units-toggle:hover { border-color: #4fc3f7; color: #4fc3f7; }
 
 /* Main content */
 .content { display: grid; grid-template-columns: 1fr 300px; gap: 20px; }
@@ -400,17 +450,19 @@ h1 { font-size: 1.4em; margin-bottom: 10px; color: #fff; }
 </head>
 <body>
 <div class="container">
-<h1>🔬 Spyglass Flame Chart</h1>
+<h1 id="title">Spyglass Flame Chart</h1>
 <div class="subtitle" id="subtitle"></div>
 
 <div class="controls">
   <button id="play-btn" onclick="togglePlay()">▶ Play</button>
   <span class="time-display" id="time-display">-6.00s</span>
   <span style="color:#666;font-size:0.8em" id="sample-count"></span>
+  <button class="units-toggle" id="units-toggle" onclick="toggleUnits()">show cpu-sec</button>
 </div>
 
 <div class="timeline">
   <div class="timeline-title">Category breakdown over time</div>
+  <div class="y-axis" id="y-axis"></div>
   <div class="stacked-chart" id="stacked-chart"></div>
   <div class="time-axis" id="time-axis"></div>
 </div>
@@ -442,8 +494,20 @@ const DATA = /*DATA_PLACEHOLDER*/;
 let currentBin = 0;
 let playing = false;
 let playInterval = null;
+const UNIT_CYCLES = 0, UNIT_SECONDS = 1, UNIT_PCT = 2;
+const UNIT_LABELS = ["cycles", "cpu-sec", "%"];
+let unitMode = UNIT_CYCLES;
 
 function init() {
+  // Title with nickname and optional PR link
+  const titleEl = document.getElementById("title");
+  if (DATA.nickname) {
+    if (DATA.pr_number) {
+      titleEl.innerHTML = `Spyglass Flame Chart &mdash; <a href="https://github.com/sigp/lighthouse/pull/${DATA.pr_number}" style="color:#4fc3f7;text-decoration:none">${DATA.nickname}</a>`;
+    } else {
+      titleEl.textContent = `Spyglass Flame Chart — ${DATA.nickname}`;
+    }
+  }
   document.getElementById("subtitle").textContent =
     `${DATA.epochs.length} epoch(s) overlaid | ${DATA.window}s window (${DATA.warmup}s + ${DATA.cooldown}s) | ${DATA.bin_size}s bins`;
   document.getElementById("bin-slider").max = DATA.num_bins - 1;
@@ -454,9 +518,44 @@ function init() {
   selectBin(0);
 }
 
+function formatCount(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return n.toString();
+}
+
+function formatSeconds(n) {
+  if (n >= 60) return (n / 60).toFixed(1) + "m";
+  if (n >= 1) return n.toFixed(1) + "s";
+  if (n >= 0.001) return (n * 1000).toFixed(0) + "ms";
+  return "0s";
+}
+
+function formatValue(samples, pct) {
+  if (unitMode === UNIT_CYCLES) return formatCount(samples);
+  if (unitMode === UNIT_SECONDS && DATA.perf_frequency) return formatSeconds(samples / DATA.perf_frequency);
+  if (unitMode === UNIT_PCT) return pct.toFixed(1) + "%";
+  return formatCount(samples);
+}
+
+function buildYAxis() {
+  const yAxis = document.getElementById("y-axis");
+  yAxis.innerHTML = "";
+  const max = DATA.max_samples;
+  [1.0, 0.75, 0.5, 0.25, 0].forEach(frac => {
+    const tick = document.createElement("div");
+    const val = Math.round(max * frac);
+    tick.textContent = formatValue(val, frac * 100);
+    yAxis.appendChild(tick);
+  });
+}
+
 function buildStackedChart() {
   const chart = document.getElementById("stacked-chart");
   const maxSamples = Math.max(...DATA.bins.map(b => b.total_samples));
+
+  buildYAxis();
 
   for (let i = 0; i < DATA.num_bins; i++) {
     const bin = DATA.bins[i];
@@ -474,6 +573,7 @@ function buildStackedChart() {
       if (pct > 0) {
         const seg = document.createElement("div");
         seg.className = "bin-segment";
+        seg.dataset.cat = ci;
         seg.style.height = pct + "%";
         seg.style.background = DATA.category_colors[ci % DATA.category_colors.length];
         bar.appendChild(seg);
@@ -518,18 +618,19 @@ function selectBin(idx) {
   document.getElementById("sample-count").textContent =
     bin.total_samples.toLocaleString() + " samples";
 
-  // Categories — sort by current percentage descending
+  // Categories — sort by sample count descending
   const legend = document.getElementById("cat-legend");
   const catEntries = DATA.category_names.map((cat, ci) => ({
-    name: cat, ci, pct: bin.categories[cat] || 0
-  })).sort((a, b) => b.pct - a.pct);
+    name: cat, ci, pct: bin.categories[cat] || 0,
+    samples: Math.round(bin.total_samples * (bin.categories[cat] || 0) / 100),
+  })).sort((a, b) => b.samples - a.samples);
   const hasFilters = activeCategories.size > 0 || activeFunctions.size > 0;
-  legend.innerHTML = catEntries.map(({name, ci, pct}) => {
+  legend.innerHTML = catEntries.map(({name, ci, pct, samples}) => {
     const isActive = activeCategories.has(ci);
     const dimmed = hasFilters && !isActive ? ' dimmed' : '';
     return `<div class="cat-item${isActive ? ' active' : ''}${dimmed}" onclick="toggleCategory(${ci})">` +
       `<div class="cat-swatch" style="background:${DATA.category_colors[ci]}"></div>` +
-      `<span class="cat-pct">${pct.toFixed(1)}%</span><span>${name}</span></div>`;
+      `<span class="cat-pct">${formatValue(samples, pct)}</span><span>${name}</span></div>`;
   }).join("");
 
   // Top functions
@@ -537,7 +638,7 @@ function selectBin(idx) {
   table.innerHTML = bin.top_functions.map((f, fi) => {
     const isActive = activeFunctions.has(f.name);
     return `<tr class="${isActive ? 'active' : ''}" onclick="toggleFunction(${fi})">` +
-      `<td class="pct">${f.pct.toFixed(1)}%</td>` +
+      `<td class="pct">${formatValue(f.samples, f.pct)}</td>` +
       `<td class="name" title="${escHtml(f.name)}">${escHtml(f.name)}</td></tr>`;
   }).join("");
 
@@ -660,6 +761,15 @@ function togglePlay() {
   }
 }
 
+function toggleUnits() {
+  unitMode = (unitMode + 1) % 3;
+  if (unitMode === UNIT_SECONDS && !DATA.perf_frequency) unitMode = (unitMode + 1) % 3;
+  const next = UNIT_LABELS[(unitMode + 1) % 3];
+  document.getElementById("units-toggle").textContent = `show ${next}`;
+  buildYAxis();
+  selectBin(currentBin);
+}
+
 let activeCategories = new Set();
 let activeFunctions = new Set();
 
@@ -694,17 +804,28 @@ function clearFilters() {
 
 function applyHighlight() {
   const frames = document.querySelectorAll(".fg-frame");
+  const segments = document.querySelectorAll(".bin-segment");
   const hasFilters = activeCategories.size > 0 || activeFunctions.size > 0;
   if (!hasFilters) {
     frames.forEach(f => { f.style.opacity = ""; });
+    segments.forEach(s => { s.style.opacity = ""; });
     return;
   }
+  // Highlight flamegraph frames
   frames.forEach(f => {
     const title = f.querySelector("title");
     if (!title) { f.style.opacity = "0.15"; return; }
     const name = title.textContent.split("\\n")[0];
     f.style.opacity = frameMatchesFilters(name) ? "1" : "0.15";
   });
+  // Highlight timeline segments
+  if (activeCategories.size > 0) {
+    segments.forEach(s => {
+      s.style.opacity = activeCategories.has(+s.dataset.cat) ? "1" : "0.15";
+    });
+  } else {
+    segments.forEach(s => { s.style.opacity = ""; });
+  }
 }
 
 function frameMatchesFilters(frameName) {

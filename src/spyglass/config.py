@@ -25,14 +25,10 @@ def _default_config_path() -> Path:
     return Path(__file__).resolve().parent.parent.parent / DEFAULT_CONFIG_NAME
 
 
-def _project_root() -> Path:
-    """Return the project root directory."""
-    return Path(__file__).resolve().parent.parent.parent
-
-
 @dataclass
 class PathsConfig:
     """Paths configuration section."""
+
     lighthouse_dir: Path
 
     @classmethod
@@ -49,6 +45,7 @@ class PathsConfig:
 @dataclass
 class LighthouseConfig:
     """Lighthouse node configuration section."""
+
     network: str = "mainnet"
     checkpoint_sync_url: str = "https://mainnet.checkpoint.sigp.io"
     extra_flags: list[str] = field(default_factory=list)
@@ -65,10 +62,15 @@ class LighthouseConfig:
             metrics_port=data.get("metrics_port", cls.metrics_port),
         )
 
+    @property
+    def beacon_url(self) -> str:
+        return f"http://127.0.0.1:{self.http_port}"
+
 
 @dataclass
 class ProfilingConfig:
     """Profiling configuration section."""
+
     perf_frequency: int = 1000
     profile: str = "release"
     disable_backfill: bool = True
@@ -93,6 +95,7 @@ class ProfilingConfig:
 @dataclass
 class FilteringConfig:
     """Filtering configuration section."""
+
     epoch_boundary_warmup: float = 6.0
     epoch_boundary_cooldown: float = 6.0
 
@@ -100,13 +103,16 @@ class FilteringConfig:
     def from_toml(cls, data: dict) -> "FilteringConfig":
         return cls(
             epoch_boundary_warmup=data.get("epoch_boundary_warmup", cls.epoch_boundary_warmup),
-            epoch_boundary_cooldown=data.get("epoch_boundary_cooldown", cls.epoch_boundary_cooldown),
+            epoch_boundary_cooldown=data.get(
+                "epoch_boundary_cooldown", cls.epoch_boundary_cooldown
+            ),
         )
 
 
 @dataclass
 class MockElConfig:
     """Mock execution layer configuration section."""
+
     listen_address: str = "127.0.0.1"
     listen_port: int = 8551
 
@@ -124,6 +130,7 @@ class SpyglassConfig:
 
     Provides typed, IDE-friendly access to all configuration values.
     """
+
     paths: PathsConfig
     lighthouse: LighthouseConfig
     profiling: ProfilingConfig
@@ -154,7 +161,7 @@ def load_config(config_path: Path | None = None) -> "SpyglassConfig":
 
     config_dir = path.resolve().parent
 
-    return SpyglassConfig(
+    config = SpyglassConfig(
         paths=PathsConfig.from_toml(raw.get("paths", {}), config_dir),
         lighthouse=LighthouseConfig.from_toml(raw.get("lighthouse", {})),
         profiling=ProfilingConfig.from_toml(raw.get("profiling", {})),
@@ -162,6 +169,33 @@ def load_config(config_path: Path | None = None) -> "SpyglassConfig":
         mock_el=MockElConfig.from_toml(raw.get("mock_el", {})),
         config_dir=config_dir,
     )
+    _validate_config(config)
+    return config
+
+
+def _validate_config(config: "SpyglassConfig"):
+    """Validate configuration values."""
+    errors = []
+    p = config.profiling
+    if not (0 <= p.start_slot < 32):
+        errors.append(f"profiling.start_slot must be 0-31, got {p.start_slot}")
+    if not (0 <= p.end_slot < 32):
+        errors.append(f"profiling.end_slot must be 0-31, got {p.end_slot}")
+    if p.perf_frequency <= 0:
+        errors.append(f"profiling.perf_frequency must be positive, got {p.perf_frequency}")
+    if config.lighthouse.http_port <= 0 or config.lighthouse.http_port > 65535:
+        errors.append(f"lighthouse.http_port must be 1-65535, got {config.lighthouse.http_port}")
+    if config.lighthouse.metrics_port <= 0 or config.lighthouse.metrics_port > 65535:
+        errors.append(
+            f"lighthouse.metrics_port must be 1-65535, got {config.lighthouse.metrics_port}"
+        )
+    if config.mock_el.listen_port <= 0 or config.mock_el.listen_port > 65535:
+        errors.append(f"mock_el.listen_port must be 1-65535, got {config.mock_el.listen_port}")
+    if errors:
+        print("ERROR: Invalid configuration:", file=sys.stderr)
+        for e in errors:
+            print(f"  - {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def resolve_output_path(
@@ -199,13 +233,15 @@ def _get_lighthouse_branch(config: "SpyglassConfig") -> str:
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=lh_dir,
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0:
             branch = result.stdout.strip()
             # HEAD means detached — fall back to short commit hash
             if branch == "HEAD":
-                return _get_lighthouse_commit_hash(config) or "unknown"
+                return get_lighthouse_commit_hash(config) or "unknown"
             # Sanitize branch name for use as directory name
             return branch.replace("/", "_").replace(" ", "_") or "unknown"
     except Exception:
@@ -214,15 +250,6 @@ def _get_lighthouse_branch(config: "SpyglassConfig") -> str:
 
 
 def get_lighthouse_commit_hash(config: "SpyglassConfig") -> str | None:
-    """Get the current git commit hash from the lighthouse repo.
-
-    Returns the short commit hash, or None if it cannot be determined.
-    This is used to record the exact commit in run.json metadata.
-    """
-    return _get_lighthouse_commit_hash(config)
-
-
-def _get_lighthouse_commit_hash(config: "SpyglassConfig") -> str | None:
     """Get the short git commit hash from the lighthouse repo."""
     lh_dir = config.paths.lighthouse_dir
     if not lh_dir.exists():
@@ -231,7 +258,9 @@ def _get_lighthouse_commit_hash(config: "SpyglassConfig") -> str | None:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             cwd=lh_dir,
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0:
             return result.stdout.strip() or None

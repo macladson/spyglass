@@ -9,9 +9,10 @@ from pathlib import Path
 from .config import SpyglassConfig
 from .constants import BOLD, RESET
 from .filters import (
-    load_epochs, load_sync_status, compute_time_ranges,
-    _load_clock_offset, _get_first_perf_timestamp, _merge_ranges,
-    _in_ranges_bisect,
+    compute_time_ranges,
+    get_clock_offset,
+    in_ranges_bisect,
+    merge_ranges,
 )
 
 
@@ -42,6 +43,7 @@ def cmd_export(
     """
     if format == "flamechart":
         from .flamechart import cmd_flamechart
+
         cmd_flamechart(config, profile_dir, bin_size=bin_size, verbose=verbose)
         return
 
@@ -92,6 +94,7 @@ def _export_flamegraph(
 
         if filter_mode == "all":
             import shutil
+
             shutil.copy2(collapsed_full, collapsed_path)
         else:
             warmup = config.filtering.epoch_boundary_warmup
@@ -143,17 +146,10 @@ def _export_perf_script(
     print(f"  {BOLD}Output:{RESET}  {output_file}")
 
     # Get clock offset for time range conversion
-    clock_offset = _load_clock_offset(profile_dir)
+    clock_offset = get_clock_offset(profile_dir)
     if clock_offset is None and time_ranges is not None:
-        sync_status = load_sync_status(profile_dir)
-        recording_start = sync_status.get("recording_start_time")
-        env = {**os.environ, "DEBUGINFOD_URLS": ""}
-        first_ts = _get_first_perf_timestamp(perf_data, env)
-        if first_ts is None or recording_start is None:
-            print("  WARNING: Cannot determine clock offset, exporting all samples")
-            time_ranges = None
-        else:
-            clock_offset = recording_start - first_ts
+        print("  WARNING: Cannot determine clock offset, exporting all samples")
+        time_ranges = None
 
     # Convert to perf monotonic time
     perf_ranges = None
@@ -162,7 +158,7 @@ def _export_perf_script(
             [(start - clock_offset, end - clock_offset) for start, end in time_ranges],
             key=lambda r: r[0],
         )
-        perf_ranges = _merge_ranges(perf_ranges)
+        perf_ranges = merge_ranges(perf_ranges)
 
     # Stream perf script, filtering by timestamp
     env = {**os.environ, "DEBUGINFOD_URLS": ""}
@@ -202,7 +198,7 @@ def _export_perf_script(
                     total_samples += 1
                     ts = float(m.group(1))
                     if perf_ranges:
-                        current_in_range = _in_ranges_bisect(ts, range_starts, range_ends)
+                        current_in_range = in_ranges_bisect(ts, range_starts, range_ends)
                     else:
                         current_in_range = True
 
@@ -218,8 +214,9 @@ def _export_perf_script(
     perf_proc.wait()
 
     size_mb = output_file.stat().st_size / 1024 / 1024
-    print(f"  {BOLD}Samples:{RESET} {written_samples:,} / {total_samples:,} ({100*written_samples/total_samples:.1f}%)")
+    pct = 100 * written_samples / total_samples if total_samples else 0
+    print(f"  {BOLD}Samples:{RESET} {written_samples:,} / {total_samples:,} ({pct:.1f}%)")
     print(f"  {BOLD}Size:{RESET}    {size_mb:.1f} MB")
     print(f"\n{BOLD}=== Export complete ==={RESET}")
-    print(f"  Upload to https://profiler.firefox.com")
+    print("  Upload to https://profiler.firefox.com")
     print()
