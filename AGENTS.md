@@ -16,8 +16,8 @@ python3 -m spyglass build --mode cpu
 python3 -m spyglass run --mode cpu -n my-test
 python3 -m spyglass analyze my-test --filter epoch-boundary
 python3 -m spyglass analyze my-test --filter all              # runs all three filters
-python3 -m spyglass compare ./profiles/baseline/cpu ./profiles/opt/cpu --filter epoch-boundary
-python3 -m spyglass compare ./profiles/baseline/cpu ./profiles/opt/cpu --filter all  # compares all available views
+python3 -m spyglass compare baseline opt --filter epoch-boundary
+python3 -m spyglass compare baseline opt --filter all  # compares all available views
 
 # Profile a GitHub PR
 spyglass profile --mode cpu --pr 6789
@@ -107,5 +107,5 @@ git checkout my-optimization
 python3 -m spyglass profile --mode cpu -n my-opt
 python3 -m spyglass analyze main --filter all
 python3 -m spyglass analyze my-opt --filter all
-python3 -m spyglass compare ./profiles/main/cpu ./profiles/my-opt/cpu --filter all
+python3 -m spyglass compare main my-opt --filter all
 ```

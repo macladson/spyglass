@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .analyze import analyze_collapsed
 from .categories import categorize_collapsed, load_categories
-from .constants import BOLD, RESET
+from .constants import log, log_end, log_start, log_step
 
 
 def cmd_compare(config, dir_a: Path, dir_b: Path, filter_mode: str = "all", units: str = "cycles"):
@@ -51,11 +51,9 @@ def cmd_compare(config, dir_a: Path, dir_b: Path, filter_mode: str = "all", unit
         )
         sys.exit(1)
 
-    print(f"{BOLD}=== Compare ==={RESET}")
-    print(f"  {BOLD}Baseline:{RESET}   {dir_a.name}")
-    print(f"  {BOLD}Comparison:{RESET} {dir_b.name}")
-    print(f"  {BOLD}Filter:{RESET}     {filter_mode}")
-    print()
+    name_a = dir_a.parent.name
+    name_b = dir_b.parent.name
+    log_start("compare", f"{name_a} vs {name_b} / {filter_mode}")
 
     analysis_a = analyze_collapsed(collapsed_a)
     analysis_b = analyze_collapsed(collapsed_b)
@@ -185,14 +183,14 @@ def cmd_compare(config, dir_a: Path, dir_b: Path, filter_mode: str = "all", unit
     view_dir.mkdir(parents=True, exist_ok=True)
     output = view_dir / "comparison.md"
     output.write_text("\n".join(lines))
-    print(f"  {BOLD}Written:{RESET} {output}")
+    log_step(f"comparison.md")
 
     # Generate differential flamegraph
     diff_svg = _generate_diff_flamegraph(collapsed_a, collapsed_b, view_dir)
     if diff_svg:
-        print(f"  {BOLD}Diff flamegraph:{RESET} {diff_svg}")
+        log_step(f"diff.svg")
 
-    print(f"\n{BOLD}=== Compare complete ==={RESET}\n")
+    log_end(f"done → {view_dir}")
 
 
 def _generate_diff_flamegraph(
@@ -234,6 +232,4 @@ def _generate_diff_flamegraph(
         svg_path.unlink(missing_ok=True)
         return None
 
-    size_kb = svg_path.stat().st_size / 1024
-    print(f"  Generating diff flamegraph ({size_kb:.0f} KB)...")
     return svg_path

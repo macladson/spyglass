@@ -1,6 +1,7 @@
 """CLI entry point for the Lighthouse profiling tool."""
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -11,7 +12,6 @@ from .clean import cmd_clean
 from .compare import cmd_compare
 from .config import load_config, resolve_output_path
 from .export import cmd_export
-from .flamechart import cmd_flamechart
 from .run import cmd_run
 
 
@@ -25,8 +25,6 @@ def _resolve_profile_dirs(config, target: str) -> list[Path]:
     target_path = Path(target)
     if target_path.is_dir():
         return [target_path]
-
-    import os
 
     base = Path(os.path.expanduser(config.profiling.output_dir))
     if not base.is_absolute():
@@ -50,36 +48,60 @@ def _resolve_profile_dirs(config, target: str) -> list[Path]:
     return dirs
 
 
+def _resolve_compare_pairs(config, target_a: str, target_b: str) -> list[tuple[Path, Path]]:
+    """Resolve two targets to paired profile directories for comparison.
+
+    Matches directories by mode name (cpu, memory) so cpu compares with cpu, etc.
+    """
+    dirs_a = _resolve_profile_dirs(config, target_a)
+    dirs_b = _resolve_profile_dirs(config, target_b)
+    map_a = {d.name: d for d in dirs_a}
+    map_b = {d.name: d for d in dirs_b}
+    common = sorted(set(map_a.keys()) & set(map_b.keys()))
+    if not common:
+        print(
+            f"ERROR: No common profile modes between '{target_a}' and '{target_b}'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return [(map_a[mode], map_b[mode]) for mode in common]
+
+
+def _reorder_groups(parser):
+    """Reorder argument groups so 'global' comes first, then unnamed, then 'config overrides'."""
+    groups = parser._action_groups
+    named = {g.title: g for g in groups}
+    order = []
+    if "global" in named:
+        order.append(named["global"])
+    for g in groups:
+        if g.title not in ("global", "config overrides"):
+            order.append(g)
+    if "config overrides" in named:
+        order.append(named["config overrides"])
+    parser._action_groups = order
+
+
 def main():
-    # Shared parent parser for global flags (--config, --verbose)
-    # This allows them to appear before OR after the subcommand.
     parent_parser = argparse.ArgumentParser(add_help=False)
-    parent_parser.add_argument(
+    global_group = parent_parser.add_argument_group("global")
+    global_group.add_argument(
+        "--help", "-h", action="help", default=argparse.SUPPRESS,
+        help="show this help message and exit",
+    )
+    global_group.add_argument(
         "--config",
         "-c",
         type=Path,
         default=None,
-        help="Path to config file (default: config.toml in project directory)",
+        help="path to config file (default: config.toml in project directory)",
     )
-    parent_parser.add_argument(
+    global_group.add_argument(
         "--verbose",
         "-v",
         action="store_true",
         default=False,
-        help="Show build output and lighthouse logs (default: silenced)",
-    )
-    parent_parser.add_argument(
-        "--nickname",
-        "-n",
-        type=str,
-        default=None,
-        help="Run nickname (overrides config; used as output subdirectory name)",
-    )
-    parent_parser.add_argument(
-        "--pr",
-        type=int,
-        default=None,
-        help="Fetch and profile a GitHub PR by number (creates a git worktree)",
+        help="show build output and lighthouse logs (default: silenced)",
     )
 
     parser = argparse.ArgumentParser(
@@ -87,188 +109,191 @@ def main():
         description="Lighthouse profiling tool — build, run, analyze, and compare profiles.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         parents=[parent_parser],
+        add_help=False,
         epilog="""\nExamples:
   %(prog)s profile --mode cpu -n my-test
   %(prog)s profile --mode cpu --pr 6789
   %(prog)s build --mode cpu
   %(prog)s run --mode cpu -n my-test
-  %(prog)s analyze ./profiles/my-test/cpu --filter epoch-boundary
-  %(prog)s export ./profiles/my-test/cpu perf-script --filter epoch-boundary
-  %(prog)s compare ./profiles/baseline/cpu ./profiles/opt/cpu --filter epoch-boundary
+  %(prog)s analyze my-test --filter epoch-boundary
+  %(prog)s export my-test perf-script --filter epoch-boundary
+  %(prog)s compare baseline my-test --filter epoch-boundary
   %(prog)s clean
 """,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    subparsers = parser.add_subparsers(dest="command", help="available commands")
 
     # --- build ---
     build_parser = subparsers.add_parser(
-        "build", help="Build Lighthouse with profiling support", parents=[parent_parser]
+        "build", help="build lighthouse with profiling support", parents=[parent_parser], add_help=False
     )
     build_parser.add_argument(
         "--mode",
         "-m",
         choices=["cpu", "memory"],
         default="cpu",
-        help="Profiling mode (default: cpu)",
+        help="profiling mode (default: cpu)",
     )
+    build_parser.add_argument(
+        "--pr",
+        type=int,
+        default=None,
+        help="fetch and build a GitHub PR by number",
+    )
+    _reorder_groups(build_parser)
 
     # Shared args for run and profile commands
     run_profile_parent = argparse.ArgumentParser(add_help=False)
     run_profile_parent.add_argument(
-        "--mode", "-m", choices=["cpu", "memory"], required=True, help="Profiling mode"
+        "--epochs", "-e", type=int, default=1, help="number of epochs to capture (default: 1)"
     )
     run_profile_parent.add_argument(
-        "--output-dir", "-o", type=str, default=None, help="Base output directory"
+        "--force", action="store_true", default=False, help="overwrite existing output directory"
     )
     run_profile_parent.add_argument(
-        "--duration", "-d", type=int, default=None, help="Duration in seconds (safety timeout)"
+        "--mode", "-m", choices=["cpu", "memory"], default="cpu", help="profiling mode (default: cpu)"
     )
     run_profile_parent.add_argument(
-        "--epochs", "-e", type=int, default=1, help="Number of epochs to capture (default: 1)"
+        "--pr", type=int, default=None, help="fetch and profile a GitHub PR by number",
     )
-    run_profile_parent.add_argument(
-        "--force", action="store_true", default=False, help="Overwrite existing output directory"
+    overrides = run_profile_parent.add_argument_group("config overrides")
+    overrides.add_argument(
+        "--nickname", "-n", type=str, default=None,
+        help="override profiling.nickname (used as output subdirectory name)",
+    )
+    overrides.add_argument(
+        "--output-dir", "-o", type=str, default=None,
+        help="override profiling.output_dir",
     )
 
     # --- run ---
     run_parser = subparsers.add_parser(
-        "run", help="Run Lighthouse under a profiler", parents=[parent_parser, run_profile_parent]
+        "run", help="run lighthouse under a profiler", parents=[parent_parser, run_profile_parent], add_help=False
     )
     run_parser.add_argument(
         "--attach",
         action="store_true",
         default=False,
-        help="Attach to an existing Lighthouse process (skip build/startup)",
+        help="attach to an existing lighthouse process (skip build/startup)",
     )
     run_parser.add_argument(
         "--pid",
         type=int,
         default=None,
-        help="Lighthouse PID to attach to (default: resolved from lighthouse.service in config)",
+        help="lighthouse PID to attach to (default: auto-detected from config)",
     )
+    _reorder_groups(run_parser)
 
     # --- analyze ---
     analyze_parser = subparsers.add_parser(
-        "analyze", help="Analyze profiling output", parents=[parent_parser]
+        "analyze", help="analyze profiling output", parents=[parent_parser], add_help=False
     )
     analyze_parser.add_argument(
         "target",
         type=str,
-        help="Nickname (e.g. pr-1234) or path to profile directory",
+        help="nickname (e.g. pr-1234) or path to profile directory",
     )
     analyze_parser.add_argument(
         "--filter",
         "-f",
         choices=["all", "epoch-boundary", "mid-epoch", "steady-state"],
         default=None,
-        help="Time-based filter for samples (required for CPU profiles)",
+        help="time filter for samples (required for CPU profiles)",
     )
     analyze_parser.add_argument(
         "--units",
         choices=["cycles", "percentages", "pct"],
         default="cycles",
-        help="Display units: cycles (default) or percentages (relative %%)",
+        help="display units: cycles (default) or percentages (relative %%)",
     )
+    _reorder_groups(analyze_parser)
 
     # --- compare ---
     compare_parser = subparsers.add_parser(
-        "compare", help="Compare two profile runs", parents=[parent_parser]
+        "compare", help="compare two profile runs", parents=[parent_parser], add_help=False
     )
-    compare_parser.add_argument("dir_a", type=Path, help="Baseline profile directory")
-    compare_parser.add_argument("dir_b", type=Path, help="Comparison profile directory")
+    compare_parser.add_argument("target_a", type=str, help="baseline nickname or profile directory")
+    compare_parser.add_argument("target_b", type=str, help="comparison nickname or profile directory")
     compare_parser.add_argument(
         "--filter",
         "-f",
         choices=["all", "epoch-boundary", "mid-epoch", "steady-state"],
         required=True,
-        help="Which filtered view to compare",
+        help="which filtered view to compare",
     )
     compare_parser.add_argument(
         "--units",
         choices=["cycles", "percentages", "pct"],
         default="cycles",
-        help="Display units: cycles (default) or percentages (relative %% + deltas)",
+        help="display units: cycles (default) or percentages (relative %% + deltas)",
     )
-
-    # --- flamechart ---
-    flamechart_parser = subparsers.add_parser(
-        "flamechart", help="Generate interactive flame chart HTML", parents=[parent_parser]
-    )
-    flamechart_parser.add_argument(
-        "directory",
-        type=Path,
-        help="Profile output directory to visualize",
-    )
-    flamechart_parser.add_argument(
-        "--bin-size",
-        "-b",
-        type=float,
-        default=0.5,
-        help="Time bin width in seconds (default: 0.5)",
-    )
+    _reorder_groups(compare_parser)
 
     # --- export ---
     export_parser = subparsers.add_parser(
-        "export", help="Export profile in various formats", parents=[parent_parser]
+        "export", help="export profile in various formats", parents=[parent_parser], add_help=False
     )
     export_parser.add_argument(
-        "directory",
-        type=Path,
-        help="Profile output directory containing perf.data",
+        "target",
+        type=str,
+        help="nickname (e.g. pr-1234) or path to profile directory",
     )
     export_parser.add_argument(
         "format",
         nargs="?",
         choices=["perf-script", "flamegraph", "flamechart"],
         default="perf-script",
-        help="Export format (default: perf-script)",
-    )
-    export_parser.add_argument(
-        "--output",
-        "-o",
-        type=Path,
-        default=None,
-        help="Output file path (default: auto-generated)",
-    )
-    export_parser.add_argument(
-        "--filter",
-        "-f",
-        choices=["all", "epoch-boundary", "mid-epoch", "steady-state"],
-        required=True,
-        help="Time filter to apply",
+        help="export format (default: perf-script)",
     )
     export_parser.add_argument(
         "--bin-size",
         "-b",
         type=float,
         default=0.5,
-        help="Bin size for flamechart format (default: 0.5s)",
+        help="bin size for flamechart format (default: 0.5s)",
     )
+    export_parser.add_argument(
+        "--filter",
+        "-f",
+        choices=["all", "epoch-boundary", "mid-epoch", "steady-state"],
+        default=None,
+        help="time filter to apply (required for perf-script and flamegraph)",
+    )
+    export_parser.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        default=None,
+        help="output file path (default: auto-generated)",
+    )
+    _reorder_groups(export_parser)
 
     # --- clean ---
     clean_parser = subparsers.add_parser(
-        "clean", help="Remove profiling artifacts", parents=[parent_parser]
+        "clean", help="remove profiling artifacts", parents=[parent_parser], add_help=False
     )
     clean_parser.add_argument(
         "what",
         nargs="?",
         choices=["all", "checkouts", "profiles"],
         default="checkouts",
-        help="What to remove (default: checkouts)",
+        help="what to remove (default: checkouts)",
     )
     clean_parser.add_argument(
         "--force",
         action="store_true",
         default=False,
-        help="Skip confirmation prompt when deleting profiles",
+        help="skip confirmation prompt when deleting profiles",
     )
+    _reorder_groups(clean_parser)
 
     # --- profile (convenience) ---
-    subparsers.add_parser(
-        "profile", help="Build + run in one step", parents=[parent_parser, run_profile_parent]
+    profile_parser = subparsers.add_parser(
+        "profile", help="build + run in one step", parents=[parent_parser, run_profile_parent], add_help=False
     )
+    _reorder_groups(profile_parser)
 
     args = parser.parse_args()
 
@@ -288,7 +313,7 @@ def main():
         config.paths.lighthouse_dir = worktree_path
         config.pr_number = args.pr
         # Default nickname to pr-<number> if not explicitly set
-        if not args.nickname:
+        if hasattr(args, "nickname") and not args.nickname:
             args.nickname = f"pr-{args.pr}"
 
     # Dispatch
@@ -307,7 +332,6 @@ def main():
             args.mode,
             output_path,
             verbose=verbose,
-            duration_override=args.duration,
             epochs=args.epochs,
             force=args.force,
             attach=args.attach,
@@ -324,7 +348,9 @@ def main():
 
     elif args.command == "compare":
         units = "percentages" if args.units == "pct" else args.units
-        cmd_compare(config, args.dir_a, args.dir_b, filter_mode=args.filter, units=units)
+        pairs = _resolve_compare_pairs(config, args.target_a, args.target_b)
+        for dir_a, dir_b in pairs:
+            cmd_compare(config, dir_a, dir_b, filter_mode=args.filter, units=units)
 
     elif args.command == "profile":
         output_path = resolve_output_path(
@@ -339,24 +365,25 @@ def main():
             args.mode,
             output_path,
             verbose=verbose,
-            duration_override=args.duration,
             epochs=args.epochs,
             force=args.force,
         )
 
-    elif args.command == "flamechart":
-        cmd_flamechart(config, args.directory, bin_size=args.bin_size, verbose=verbose)
-
     elif args.command == "export":
-        cmd_export(
-            config,
-            args.directory,
-            format=args.format,
-            output_file=args.output,
-            filter_mode=args.filter,
-            bin_size=args.bin_size,
-            verbose=verbose,
-        )
+        if args.format != "flamechart" and args.filter is None:
+            print("ERROR: --filter is required for perf-script and flamegraph formats.", file=sys.stderr)
+            sys.exit(1)
+        profile_dirs = _resolve_profile_dirs(config, args.target)
+        for profile_dir in profile_dirs:
+            cmd_export(
+                config,
+                profile_dir,
+                format=args.format,
+                output_file=args.output,
+                filter_mode=args.filter,
+                bin_size=args.bin_size,
+                verbose=verbose,
+            )
 
     elif args.command == "clean":
         cmd_clean(config, what=args.what, verbose=verbose, force=args.force)

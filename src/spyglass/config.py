@@ -78,6 +78,7 @@ class ProfilingConfig:
     nickname: str = ""
     start_slot: int = 16
     end_slot: int = 15
+    safety_timeout: int = 7200
 
     @classmethod
     def from_toml(cls, data: dict) -> "ProfilingConfig":
@@ -89,6 +90,7 @@ class ProfilingConfig:
             nickname=data.get("nickname", cls.nickname),
             start_slot=data.get("start_slot", cls.start_slot),
             end_slot=data.get("end_slot", cls.end_slot),
+            safety_timeout=data.get("safety_timeout", cls.safety_timeout),
         )
 
 

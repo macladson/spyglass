@@ -13,6 +13,24 @@ CYAN = "\033[36m"
 RESET = "\033[0m"
 
 
+def log_start(command: str, detail: str = ""):
+    detail_str = f" ({detail})" if detail else ""
+    print(f"┌ {command}{detail_str}")
+
+
+def log(msg: str = ""):
+    print(f"│ {msg}" if msg else "│")
+
+
+def log_step(msg: str):
+    print(f"│ → {msg}")
+
+
+def log_end(msg: str = "done"):
+    print(f"└ {msg}")
+    print()
+
+
 def format_size(size_bytes: int) -> str:
     """Format bytes as human-readable size."""
     if size_bytes < 1024:

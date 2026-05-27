@@ -42,11 +42,12 @@ def fetch_pr(config, pr_number: int, verbose: bool = False) -> Path:
     checkouts_dir = project_root / CHECKOUTS_DIR
     checkout_path = checkouts_dir / f"pr-{pr_number}"
 
-    print(f"=== Fetch PR #{pr_number} ===")
+    from .constants import log, log_end, log_start, log_step
+
+    log_start("fetch", f"pr-{pr_number}")
 
     if checkout_path.exists():
-        # Already cloned — fetch latest into the named branch and checkout
-        print(f"  Updating existing checkout at {checkout_path}...")
+        log_step(f"updating existing checkout")
         _run_git(
             ["git", "fetch", "origin", f"pull/{pr_number}/head:pr-{pr_number}", "--force"],
             cwd=checkout_path,
@@ -61,7 +62,7 @@ def fetch_pr(config, pr_number: int, verbose: bool = False) -> Path:
         )
     else:
         # Fresh clone — shallow single-branch clone, then fetch just this PR
-        print(f"  Cloning PR #{pr_number} from {LIGHTHOUSE_REPO}...")
+        log_step(f"cloning {LIGHTHOUSE_REPO}")
         checkouts_dir.mkdir(parents=True, exist_ok=True)
 
         _run_git(
@@ -72,7 +73,7 @@ def fetch_pr(config, pr_number: int, verbose: bool = False) -> Path:
         )
 
         # Fetch the PR ref
-        print(f"  Fetching pull/{pr_number}/head...")
+        log_step(f"fetching pull/{pr_number}/head")
         _run_git(
             ["git", "fetch", "origin", f"pull/{pr_number}/head:pr-{pr_number}"],
             cwd=checkout_path,
@@ -96,9 +97,8 @@ def fetch_pr(config, pr_number: int, verbose: bool = False) -> Path:
         text=True,
     )
     if result.returncode == 0:
-        print(f"  HEAD: {result.stdout.strip()}")
+        log(f"HEAD: {result.stdout.strip()}")
 
-    print(f"  PR #{pr_number} ready at {checkout_path}")
-    print()
+    log_end(f"ready → {checkout_path}")
 
     return checkout_path

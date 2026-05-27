@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from .config import SpyglassConfig
-from .constants import BOLD, RESET
+from .constants import log, log_end, log_start, log_step
 from .filters import (
     compute_time_ranges,
     get_clock_offset,
@@ -79,10 +79,8 @@ def _export_flamegraph(
     if output_file is None:
         output_file = view_dir / "flamegraph.svg"
 
-    print(f"{BOLD}=== Export (flamegraph) ==={RESET}")
-    print(f"  {BOLD}Filter:{RESET}  {filter_mode}")
-    print(f"  {BOLD}Output:{RESET}  {output_file}")
-    print()
+    nickname = profile_dir.parent.name
+    log_start("export", f"{nickname}/flamegraph/{filter_mode}")
 
     # Ensure collapsed stacks exist in the view dir
     collapsed_path = view_dir / "profile.collapsed"
@@ -103,16 +101,14 @@ def _export_flamegraph(
             if time_ranges is None:
                 print(f"ERROR: No data available for '{filter_mode}' filter.", file=sys.stderr)
                 sys.exit(1)
-            print(f"  Filtering to {filter_mode}...")
+            log_step(f"filter {filter_mode}")
             filter_collapsed_stacks(collapsed_full, collapsed_path, time_ranges, perf_data)
 
     # Generate flamegraph
     generate_flamegraph(collapsed_path, output_file)
 
     size_kb = output_file.stat().st_size / 1024
-    print(f"\n{BOLD}=== Export complete ==={RESET}")
-    print(f"  {BOLD}Output:{RESET} {output_file} ({size_kb:.0f} KB)")
-    print()
+    log_end(f"done → {output_file} ({size_kb:.0f} KB)")
 
 
 def _export_perf_script(
@@ -141,14 +137,13 @@ def _export_perf_script(
         view_dir.mkdir(parents=True, exist_ok=True)
         output_file = view_dir / "profile.linux-perf.txt"
 
-    print(f"{BOLD}=== Export (perf-script) ==={RESET}")
-    print(f"  {BOLD}Filter:{RESET}  {filter_mode}")
-    print(f"  {BOLD}Output:{RESET}  {output_file}")
+    nickname = profile_dir.parent.name
+    log_start("export", f"{nickname}/perf-script/{filter_mode}")
 
     # Get clock offset for time range conversion
     clock_offset = get_clock_offset(profile_dir)
     if clock_offset is None and time_ranges is not None:
-        print("  WARNING: Cannot determine clock offset, exporting all samples")
+        log("WARNING: cannot determine clock offset, exporting all samples")
         time_ranges = None
 
     # Convert to perf monotonic time
@@ -215,8 +210,6 @@ def _export_perf_script(
 
     size_mb = output_file.stat().st_size / 1024 / 1024
     pct = 100 * written_samples / total_samples if total_samples else 0
-    print(f"  {BOLD}Samples:{RESET} {written_samples:,} / {total_samples:,} ({pct:.1f}%)")
-    print(f"  {BOLD}Size:{RESET}    {size_mb:.1f} MB")
-    print(f"\n{BOLD}=== Export complete ==={RESET}")
-    print("  Upload to https://profiler.firefox.com")
-    print()
+    log(f"samples: {written_samples:,} / {total_samples:,} ({pct:.1f}%)")
+    log(f"upload to https://profiler.firefox.com")
+    log_end(f"done → {output_file} ({size_mb:.1f} MB)")

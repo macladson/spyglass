@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .beacon_api import BeaconApiPoller
 from .config import SpyglassConfig, get_lighthouse_commit_hash
-from .constants import BOLD, RESET, SLOTS_PER_EPOCH
+from .constants import SLOTS_PER_EPOCH, log, log_end, log_start, log_step
 from .progress import (
     PHASE_DONE,
     PHASE_PROFILING,
@@ -151,7 +151,6 @@ def cmd_run(
     mode: str,
     output_dir: Path,
     verbose: bool = False,
-    duration_override: int | None = None,
     epochs: int = 1,
     force: bool = False,
     attach: bool = False,
@@ -171,7 +170,6 @@ def cmd_run(
         mode: "cpu" or "memory"
         output_dir: Directory for profiling output
         verbose: Show lighthouse/mock-el output
-        duration_override: Safety timeout in seconds
         epochs: Number of epochs to capture
         attach: Enable attach mode
         attach_pid: PID of running lighthouse process (auto-resolved if omitted)
@@ -184,7 +182,7 @@ def cmd_run(
     network = config.lighthouse.network
     metrics_port = config.lighthouse.metrics_port
 
-    effective_timeout = duration_override or 7200
+    effective_timeout = config.profiling.safety_timeout
 
     start_slot = config.profiling.start_slot
     end_slot = config.profiling.end_slot
@@ -201,7 +199,7 @@ def cmd_run(
                 )
                 print("  Provide --pid explicitly, or check network/http_port in config.", file=sys.stderr)
                 sys.exit(1)
-            print(f"  Found lighthouse bn ({network}, port {http_port}) at PID {attach_pid}")
+            log_step(f"found lighthouse bn ({network}, port {http_port}) at PID {attach_pid}")
         if not _pid_alive(attach_pid):
             print(f"ERROR: PID {attach_pid} not found", file=sys.stderr)
             sys.exit(1)
@@ -218,17 +216,15 @@ def cmd_run(
 
     _check_required_tools(mode)
 
-    print(f"{BOLD}=== Run ==={RESET}")
-    print(f"  {BOLD}Mode:{RESET}     {mode}")
-    print(f"  {BOLD}Network:{RESET}  {network}")
-    print(f"  {BOLD}Target:{RESET}   {epochs} epoch(s) (timeout: {effective_timeout}s)")
-    print(f"  {BOLD}Output:{RESET}   {output_dir}")
+    nickname = output_dir.parent.name
+    log_start("run", nickname)
+    log(f"mode: {mode}  network: {network}  epochs: {epochs}  timeout: {effective_timeout}s")
+    log(f"output: {output_dir}")
     if attach_mode:
-        print(f"  {BOLD}Attach:{RESET}   PID {attach_pid}")
-        print(f"  {BOLD}Beacon:{RESET}   {config.lighthouse.beacon_url}")
+        log(f"attach: PID {attach_pid}  beacon: {config.lighthouse.beacon_url}")
     else:
-        print(f"  {BOLD}Binary:{RESET}   {lighthouse_bin}")
-    print()
+        log(f"binary: {lighthouse_bin}")
+    log()
 
     # Setup output directory
     if output_dir.exists() and any(output_dir.iterdir()):
@@ -276,7 +272,7 @@ def cmd_run(
             "--listen-port",
             str(mel_port),
         ]
-        print(f"  Starting mock-el on {mel_addr}:{mel_port}...")
+        log_step(f"starting mock-el on {mel_addr}:{mel_port}")
 
         devnull = None if verbose else subprocess.DEVNULL
         mock_el_proc = subprocess.Popen(mock_el_cmd, stdout=devnull, stderr=devnull)
@@ -346,7 +342,7 @@ def cmd_run(
                 print("ERROR: mock-el did not start within 5 seconds", file=sys.stderr)
                 cleanup()
                 sys.exit(1)
-            print("  mock-el ready.")
+            log_step("mock-el ready")
 
             # Build lighthouse command (no perf wrapper)
             execution_endpoint = f"http://{mel_addr}:{mel_port}"
@@ -381,8 +377,9 @@ def cmd_run(
                 )
 
             if not verbose:
-                print("  (logs silenced, use --verbose to see them)")
-            print()
+                log_step("lighthouse started (logs silenced, use --verbose to see them)")
+            else:
+                log_step("lighthouse started")
 
             lh_stdout = None if verbose else subprocess.DEVNULL
             lh_stderr = None if verbose else subprocess.DEVNULL
@@ -593,16 +590,6 @@ def cmd_run(
         run_info["mock_el"] = f"{config.mock_el.listen_address}:{config.mock_el.listen_port}"
     (output_dir / "run.json").write_text(json.dumps(run_info, indent=2))
 
-    # Clear progress line and print summary
     sys.stdout.write("\r\033[K")
     sys.stdout.flush()
-    print(f"\n{BOLD}=== Run complete ({elapsed:.0f}s profiling) ==={RESET}")
-    print(f"  {BOLD}Output:{RESET} {output_dir}")
-    for f in sorted(output_dir.iterdir()):
-        if f.is_file():
-            size_mb = f.stat().st_size / 1024 / 1024
-            if size_mb > 1:
-                print(f"    {f.name} ({size_mb:.1f} MB)")
-            else:
-                print(f"    {f.name} ({f.stat().st_size / 1024:.1f} KB)")
-    print()
+    log_end(f"done ({elapsed:.0f}s) → {output_dir}")

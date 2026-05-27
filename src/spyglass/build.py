@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .config import SpyglassConfig
-from .constants import BOLD, RESET
+from .constants import log, log_end, log_start
 
 
 def cmd_build(config: SpyglassConfig, mode: str, verbose: bool = False):
@@ -30,11 +30,11 @@ def cmd_build(config: SpyglassConfig, mode: str, verbose: bool = False):
         print(f"ERROR: Lighthouse directory not found: {lighthouse_dir}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"{BOLD}=== Build ==={RESET}")
-    print(f"  {BOLD}Mode:{RESET}             {mode}")
-    print(f"  {BOLD}Lighthouse dir:{RESET}   {lighthouse_dir}")
-    print(f"  {BOLD}Profile:{RESET}          {profile}")
-    print(f"  {BOLD}Disable backfill:{RESET} {do_disable_backfill}")
+    nickname = f"pr-{config.pr_number}" if config.pr_number else config.profiling.nickname
+    log_start("build", nickname or None)
+    backfill_str = "disabled" if do_disable_backfill else "enabled"
+    log(f"mode: {mode}  profile: {profile}  backfill: {backfill_str}")
+    log(f"dir: {lighthouse_dir}")
 
     # Build command
     build_cmd = [
@@ -73,7 +73,7 @@ def cmd_build(config: SpyglassConfig, mode: str, verbose: bool = False):
     build_cmd.extend(["--color", "always"])
 
     if verbose:
-        print()
+        log()
         result = subprocess.run(
             build_cmd,
             cwd=lighthouse_dir,
@@ -82,14 +82,14 @@ def cmd_build(config: SpyglassConfig, mode: str, verbose: bool = False):
     else:
         # Use a pty so cargo thinks it's writing to a terminal and shows
         # its progress bar. We filter to only show the "Building [...]" line.
-        print()
+        log()
         result = _run_build_with_pty(build_cmd, lighthouse_dir, env)
 
     if result.returncode != 0:
         print(f"\nERROR: Build failed with exit code {result.returncode}", file=sys.stderr)
         sys.exit(result.returncode)
 
-    print(f"{BOLD}=== Build complete ==={RESET}\n")
+    log_end("done")
 
 
 def _run_build_with_pty(build_cmd: list, cwd: Path, env: dict):

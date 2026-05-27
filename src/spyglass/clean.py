@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from .config import SpyglassConfig
-from .constants import format_size
+from .constants import format_size, log, log_end, log_start, log_step
 from .pr import CHECKOUTS_DIR
 
 
@@ -49,25 +49,21 @@ def cmd_clean(
                 print("Aborted.")
                 return
 
-    print("=== Clean ===")
+    log_start("clean")
     total_freed = 0
     for name, path in targets:
         if path.exists():
             size = _dir_size(path)
-            if verbose:
-                print(f"  Removing {path} ({format_size(size)})...")
-            else:
-                print(f"  Removing {name}/ ({format_size(size)})")
+            log_step(f"{name}/ ({format_size(size)})")
             try:
                 shutil.rmtree(path)
                 total_freed += size
             except OSError as e:
                 print(f"  WARNING: Failed to remove {path}: {e}", file=sys.stderr)
         else:
-            print(f"  {name}/ — not found, skipping")
+            log(f"{name}/ — not found, skipping")
 
-    print(f"\n  Freed {format_size(total_freed)} total")
-    print("=== Clean complete ===\n")
+    log_end(f"freed {format_size(total_freed)}")
 
 
 def _dir_size(path: Path) -> int:

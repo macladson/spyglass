@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .categories import categorize_sample, load_categories
 from .config import SpyglassConfig
-from .constants import BOLD, RESET
+from .constants import log, log_end, log_start, log_step
 from .filters import get_clock_offset, load_epochs
 
 
@@ -47,11 +47,9 @@ def cmd_flamechart(
     cooldown = config.filtering.epoch_boundary_cooldown
     window = warmup + cooldown
 
-    print(f"{BOLD}=== Flame Chart ==={RESET}")
-    print(f"  {BOLD}Window:{RESET}   {window}s ({warmup}s warmup + {cooldown}s cooldown)")
-    print(f"  {BOLD}Bin size:{RESET} {bin_size}s")
-    print(f"  {BOLD}Epochs:{RESET}   {len(epochs)}")
-    print()
+    nickname = profile_dir.parent.name
+    log_start("flamechart", nickname)
+    log(f"window: {window}s ({warmup}s warmup + {cooldown}s cooldown)  bin: {bin_size}s  epochs: {len(epochs)}")
 
     # Compute clock offset
     clock_offset = get_clock_offset(profile_dir)
@@ -82,17 +80,15 @@ def cmd_flamechart(
     print(f"  Bins: {num_bins} × {bin_size}s")
 
     # Process perf script output, binning samples
-    print("  Processing perf.data...")
+    log_step("processing perf.data")
     bins_data = _process_perf_into_bins(perf_data, boundary_windows, num_bins, bin_size, verbose)
 
-    # Category analysis per bin
     categories = load_categories(config.config_dir / "categories.toml")
     bins_categories = None
     if categories:
-        print("  Categorizing samples per bin...")
+        log_step("categorizing samples per bin")
         bins_categories = _categorize_bins(bins_data, categories)
 
-    # Load metadata from run.json
     perf_frequency = None
     pr_number = None
     run_json_path = profile_dir / "run.json"
@@ -101,14 +97,10 @@ def cmd_flamechart(
         perf_frequency = run_info.get("perf_frequency")
         pr_number = run_info.get("pr")
 
-    # Derive nickname from directory structure: profiles/<nickname>/<mode>/
-    nickname = profile_dir.parent.name
-
-    # Generate HTML
     view_dir = profile_dir / "views" / "epoch_boundary"
     view_dir.mkdir(parents=True, exist_ok=True)
     output_path = view_dir / "flamechart.html"
-    print(f"  Generating {output_path.name}...")
+    log_step("generating flamechart.html")
     _generate_html(
         output_path,
         bins_data,
@@ -123,9 +115,7 @@ def cmd_flamechart(
         pr_number=pr_number,
     )
 
-    print(f"\n{BOLD}=== Flame chart complete ==={RESET}")
-    print(f"  {BOLD}Output:{RESET} {output_path}")
-    print()
+    log_end(f"done → {output_path}")
 
 
 def _process_perf_into_bins(

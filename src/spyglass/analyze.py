@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .categories import categorize_collapsed, format_category_report, load_categories
 from .config import SpyglassConfig
-from .constants import BOLD, RESET
+from .constants import log, log_end, log_start, log_step
 from .filters import compute_time_ranges, filter_collapsed_stacks
 
 
@@ -21,7 +21,7 @@ def collapse_perf_data(perf_data: Path, collapsed_path: Path):
     env = {**os.environ, "DEBUGINFOD_URLS": ""}
 
     perf_size_mb = perf_data.stat().st_size / 1024 / 1024
-    print(f"  Collapsing stacks ({perf_size_mb:.0f} MB perf.data)...")
+    log_step(f"collapse stacks ({perf_size_mb:.0f} MB perf.data)")
 
     perf_proc = subprocess.Popen(
         ["perf", "script", "--no-inline", "-i", str(perf_data)],
@@ -54,12 +54,12 @@ def collapse_perf_data(perf_data: Path, collapsed_path: Path):
         sys.exit(1)
 
     size_kb = collapsed_path.stat().st_size / 1024
-    print(f"    -> {collapsed_path.name} ({size_kb:.0f} KB)")
+    log(f"  {collapsed_path.name} ({size_kb:.0f} KB)")
 
 
 def generate_flamegraph(collapsed_path: Path, svg_path: Path):
     """Generate a flamegraph SVG from collapsed stacks."""
-    print("  Generating flamegraph...")
+    log_step("flamegraph")
     with open(collapsed_path) as inp, open(svg_path, "w") as out:
         result = subprocess.run(
             ["inferno-flamegraph"],
@@ -71,7 +71,7 @@ def generate_flamegraph(collapsed_path: Path, svg_path: Path):
         print(f"ERROR: inferno-flamegraph failed: {result.stderr.decode()}", file=sys.stderr)
         sys.exit(1)
     size_kb = svg_path.stat().st_size / 1024
-    print(f"    -> {svg_path.name} ({size_kb:.0f} KB)")
+    log(f"  {svg_path.name} ({size_kb:.0f} KB)")
 
 
 def analyze_collapsed(collapsed_path: Path) -> dict:
@@ -196,7 +196,7 @@ def write_analysis_md(
 
     lines.append("")
     output_path.write_text("\n".join(lines))
-    print(f"    -> {output_path.name}")
+    log(f"  {output_path.name}")
 
 
 def cmd_analyze(
@@ -249,25 +249,23 @@ def _analyze_cpu(
     skip_on_missing: bool = False,
 ):
     """CPU profile analysis pipeline."""
-    print(f"{BOLD}=== Analyze (CPU) ==={RESET}")
-    print(f"  {BOLD}Filter:{RESET} {filter_mode}")
-    print()
+    nickname = profile_dir.parent.name
+    log_start("analyze", f"{nickname}/{filter_mode}")
 
-    # Step 1: Collapse stacks (full, unfiltered)
     collapsed_full = profile_dir / "profile.collapsed"
     if not collapsed_full.exists():
         collapse_perf_data(perf_data, collapsed_full)
     else:
-        print(f"  Using existing {collapsed_full.name}")
+        log(f"using existing {collapsed_full.name}")
 
-    # Step 2: Apply time-based filtering
     warmup = config.filtering.epoch_boundary_warmup
     cooldown = config.filtering.epoch_boundary_cooldown
     time_ranges = compute_time_ranges(profile_dir, filter_mode, warmup, cooldown)
 
     if time_ranges is None:
         if skip_on_missing:
-            print(f"  Skipping {filter_mode} (no epoch data available)\n")
+            log(f"skipping {filter_mode} (no epoch data available)")
+            log_end("skipped")
             return
         print(f"ERROR: No data available for '{filter_mode}' filter.", file=sys.stderr)
         print(
@@ -279,20 +277,18 @@ def _analyze_cpu(
     view_dir = profile_dir / "views" / filter_mode.replace("-", "_")
     view_dir.mkdir(parents=True, exist_ok=True)
     collapsed_path = view_dir / "profile.collapsed"
-    print(f"  Filtering to {filter_mode} time ranges...")
+    log_step(f"filter {filter_mode}")
     filter_collapsed_stacks(collapsed_full, collapsed_path, time_ranges, perf_data)
     size_kb = collapsed_path.stat().st_size / 1024
-    print(f"    -> {collapsed_path.name} ({size_kb:.0f} KB)")
+    log(f"  {collapsed_path.name} ({size_kb:.0f} KB)")
 
-    # Step 3: Analysis markdown
-    print("  Analyzing stacks...")
+    log_step("analyze stacks")
     analysis = analyze_collapsed(collapsed_path)
 
-    # Step 4: Category breakdown (if categories.toml exists)
     category_report = None
     categories = load_categories(config.config_dir / "categories.toml")
     if categories:
-        print("  Categorizing samples...")
+        log_step("categorize")
         cat_result = categorize_collapsed(collapsed_path, categories)
         category_report = format_category_report(cat_result, categories)
 
@@ -305,19 +301,16 @@ def _analyze_cpu(
         units=units,
     )
 
-    # Step 5: Generate flamegraph SVG
     svg_path = view_dir / "flamegraph.svg"
     generate_flamegraph(collapsed_path, svg_path)
 
-    print(f"\n{BOLD}=== Analysis complete ==={RESET}")
-    print(f"  {BOLD}Analysis:{RESET}   {md_path}")
-    print(f"  {BOLD}Flamegraph:{RESET} {svg_path}")
-    print()
+    log_end(f"done → {view_dir}")
 
 
 def _analyze_memory(config: SpyglassConfig, profile_dir: Path, heap_files: list[Path]):
     """Memory profile analysis pipeline."""
-    print(f"{BOLD}=== Analyze (Memory) ==={RESET}")
+    nickname = profile_dir.parent.name
+    log_start("analyze", f"{nickname}/memory")
 
     lighthouse_bin = config.lighthouse_binary
 
@@ -325,9 +318,8 @@ def _analyze_memory(config: SpyglassConfig, profile_dir: Path, heap_files: list[
         print(f"ERROR: Binary not found: {lighthouse_bin}", file=sys.stderr)
         sys.exit(1)
 
-    # Use the last heap file (final dump)
     heap_file = sorted(heap_files)[-1]
-    print(f"  Heap file: {heap_file.name}")
+    log_step(f"jeprof {heap_file.name}")
 
     result = subprocess.run(
         ["jeprof", "--text", "--cum", str(lighthouse_bin), str(heap_file)],
@@ -348,5 +340,5 @@ def _analyze_memory(config: SpyglassConfig, profile_dir: Path, heap_files: list[
         "",
     ]
     md_path.write_text("\n".join(lines))
-    print(f"    -> {md_path.name}")
-    print(f"\n{BOLD}=== Analysis complete ==={RESET}\n")
+    log(f"  {md_path.name}")
+    log_end("done")

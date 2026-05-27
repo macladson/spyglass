@@ -32,6 +32,8 @@ nickname = ""
 start_slot = 16
 # Slot within the epoch to stop recording (0-31). Default 15 = one full epoch captured.
 end_slot = 15
+# Maximum time in seconds before aborting a run (covers sync + profiling)
+safety_timeout = 7200
 
 [filtering]
 # Seconds before an epoch boundary to include in "epoch-boundary" filter

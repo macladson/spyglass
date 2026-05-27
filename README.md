@@ -2,14 +2,17 @@
 
 A Python CLI tool for CPU and memory profiling of [Lighthouse](https://github.com/sigp/lighthouse).
 
+_WARNING: This tool is a work-in-progress. There will be bugs_
+
 ## Features
 
-- **CPU profiling** via `perf record` with automatic flamegraph generation
-- **Memory profiling** via jemalloc heap dumps
-- **Epoch boundary isolation** — capture profiles around specific epoch transitions
-- **Category-based analysis** — configurable pattern matching to group samples by subsystem
-- **Metrics scraping** — Prometheus metrics captured at epoch boundaries for cache/timing analysis
-- **Comparison** — side-by-side delta reports between two profiling runs
+- **CPU profiling:** via `perf record` with automatic flamegraph generation
+- **Memory profiling:** via jemalloc heap dumps
+- **Epoch boundary isolation:** capture profiles around specific epoch transitions
+- **Category-based analysis:** configurable pattern matching to group samples by subsystem
+- **Custom flamegraph timeline:** timeline of flamegraphs across an epoch boundary colour-coded by subsystem
+- **Comparison:** side-by-side delta reports between two profiling runs
+- **Metrics scraping:** Prometheus metrics captured at epoch boundaries for cache/timing analysis
 
 ## Requirements
 
@@ -17,7 +20,7 @@ A Python CLI tool for CPU and memory profiling of [Lighthouse](https://github.co
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - Linux with `perf` installed
 - [inferno](https://github.com/jonhoo/inferno) (`cargo install inferno`)
-- `jeprof` (from the `jemalloc` package) — for memory profiling
+- `jeprof` (from the `jemalloc` package) (for memory profiling)
 
 ## Installation
 
@@ -42,18 +45,22 @@ spyglass --version
 
 ## Quick Start
 
+If you've installed with `uv pip install -e .`, you can use `spyglass` directly. Otherwise, use `python3 -m spyglass` instead.
+
 ```bash
-# Configure (edit paths to your Lighthouse checkout)
+# Configure (at minimum you will need to add the path to your Lighthouse directory)
 cp config.toml my_config.toml
 vim my_config.toml
 
-# Full workflow: build + run + analyze
-python3 -m spyglass profile --mode cpu --filter epoch-boundary -n my-experiment
+# Full workflow: build + run
+spyglass profile --mode cpu -c my_config.toml -n my-experiment
 
 # Or step by step
-python3 -m spyglass build --mode cpu
-python3 -m spyglass run --mode cpu --filter steady-state -n baseline
-python3 -m spyglass analyze ./profiles/baseline/cpu/steady_state
+spyglass build --mode cpu -c my_config.toml
+spyglass run --mode cpu -c my_config.toml -n baseline
+
+# Then analyze
+spyglass analyze baseline -c my_config.toml --filter all
 ```
 
 ## Commands
@@ -65,7 +72,6 @@ Builds Lighthouse with profiling instrumentation.
 ```bash
 python3 -m spyglass build --mode cpu      # Frame pointers for perf
 python3 -m spyglass build --mode memory   # jemalloc profiling support
-python3 -m spyglass build --mode both     # Both
 ```
 
 - CPU mode: passes `RUSTFLAGS="-C force-frame-pointers=yes"`
@@ -76,13 +82,8 @@ python3 -m spyglass build --mode both     # Both
 Runs Lighthouse under a profiler with a mock execution layer.
 
 ```bash
-# Time-based (runs for duration_seconds from config)
-python3 -m spyglass run --mode cpu --filter all -n baseline
-python3 -m spyglass run --mode cpu --filter steady-state --duration 600 -n short
-
-# Event-based (runs until N epochs captured)
-python3 -m spyglass run --mode cpu --filter epoch-boundary -n epoch-test
-python3 -m spyglass run --mode cpu --filter epoch-boundary --runs 3 -n multi-epoch
+python3 -m spyglass run --mode cpu -n baseline
+python3 -m spyglass run --mode cpu -n multi-epoch --epochs 3
 ```
 
 The tool automatically:
@@ -97,11 +98,11 @@ The tool automatically:
 Processes profiling output into flamegraphs and markdown reports.
 
 ```bash
-python3 -m spyglass analyze ./profiles/my-run/cpu/epoch_boundary
-python3 -m spyglass analyze ./profiles/my-run/cpu/epoch_boundary --filter mid-epoch
+python3 -m spyglass analyze my-run --filter epoch-boundary
+python3 -m spyglass analyze my-run --filter all  # runs all three filters
 ```
 
-Produces:
+Produces (per filter, under `views/<filter>/`):
 - `profile.collapsed` — collapsed stack format
 - `flamegraph.svg` — interactive flamegraph
 - `analysis.md` — category breakdown + top functions
@@ -111,18 +112,37 @@ Produces:
 Compares two profiling runs.
 
 ```bash
-python3 -m spyglass compare ./profiles/baseline/cpu/epoch_boundary ./profiles/optimized/cpu/epoch_boundary
+spyglass compare baseline optimized --filter epoch-boundary
+spyglass compare baseline optimized --filter all  # compares all available views
 ```
 
-Produces a `comparison.md` with category-level and function-level deltas.
+Produces a `comparison.md` with category-level and function-level deltas, plus a differential flamegraph.
 
 ### `profile`
 
 Convenience command: `build` + `run` + `analyze` in one step.
 
 ```bash
-python3 -m spyglass profile --mode cpu --filter epoch-boundary -n my-experiment
+spyglass profile --mode cpu -n my-experiment
 ```
+
+### `export`
+
+Exports profile data in formats suitable for external tools.
+
+```bash
+# Export filtered perf script text (for Firefox Profiler)
+spyglass export baseline perf-script --filter epoch-boundary
+
+# Export a filtered flamegraph SVG
+spyglass export baseline flamegraph --filter epoch-boundary
+
+# Generate an interactive HTML flame chart (epoch boundary timeline)
+spyglass export baseline flamechart
+spyglass export baseline flamechart --bin-size 0.25  # finer time resolution
+```
+
+The `perf-script` format can be uploaded to [Firefox Profiler](https://profiler.firefox.com) for interactive analysis. The `flamechart` format produces a self-contained HTML file with a category-coloured timeline and per-bin flamegraphs.
 
 ### `clean`
 
@@ -130,8 +150,8 @@ Removes spyglass artifacts (PR checkouts and/or profiling results).
 
 ```bash
 spyglass clean              # Remove PR checkouts only (default)
-spyglass clean all          # Remove checkouts + profiles
-spyglass clean profiles     # Remove only profiling results
+spyglass clean all --force  # Remove checkouts + profiles
+spyglass clean profiles     # Remove only profiling results (prompts for confirmation)
 ```
 
 ### `run --attach`
@@ -150,7 +170,7 @@ After profiling completes, the lighthouse process is left running — spyglass o
 
 #### Side-by-side profiling (stable vs unstable)
 
-When running two lighthouse instances on the same network (e.g. for A/B comparison), use separate configs with different `http_port` values to distinguish them:
+When running two simultaneous lighthouse instances on the same network (e.g. for A/B comparison), use separate configs with different `http_port` values to distinguish them:
 
 ```toml
 # config-stable.toml
@@ -168,9 +188,9 @@ spyglass run --mode cpu --attach -c config-stable.toml -n stable --epochs 3
 spyglass run --mode cpu --attach -c config-unstable.toml -n unstable --epochs 3
 
 # Compare
-spyglass analyze ./profiles/stable/cpu --filter epoch-boundary
-spyglass analyze ./profiles/unstable/cpu --filter epoch-boundary
-spyglass compare ./profiles/stable/cpu ./profiles/unstable/cpu --filter epoch-boundary
+spyglass analyze stable --filter all
+spyglass analyze unstable --filter all
+spyglass compare stable unstable --filter all
 ```
 
 ### Profiling a GitHub PR
@@ -179,11 +199,13 @@ Fetch and profile a pull request directly from `sigp/lighthouse`:
 
 ```bash
 # Profile PR #6789 (clones into checkouts/pr-6789/, builds, profiles)
-spyglass profile --mode cpu --filter epoch-boundary --pr 6789
+spyglass profile --mode cpu --pr 6789
 
 # Compare against your local branch
-spyglass profile --mode cpu --filter epoch-boundary -n baseline
-spyglass compare ./profiles/baseline/cpu/epoch_boundary ./profiles/pr-6789/cpu/epoch_boundary
+spyglass profile --mode cpu -n baseline
+spyglass analyze baseline --filter all
+spyglass analyze pr-6789 --filter all
+spyglass compare baseline pr-6789 --filter all
 ```
 
 The `--pr` flag works with any command (`build`, `run`, `profile`). It:
@@ -196,24 +218,28 @@ The `--pr` flag works with any command (`build`, `run`, `profile`). It:
 
 ```
 profiles/
-  <nickname-or-commit>/
+  <nickname-or-branch>/
     cpu/
-      epoch_boundary/
-        perf.data
-        profile.collapsed
-        flamegraph.svg
-        analysis.md
-        epochs.json
-        sync_status.json
-        run.json
-        metrics/
-          epoch_<N>_pre.txt
-          epoch_<N>_post.txt
-          epoch_<N>_delta.json
+      perf.data             # Raw perf recording
+      profile.collapsed     # Full collapsed stacks (unfiltered)
+      epochs.json           # Detected epoch boundaries with timestamps
+      run.json              # Run metadata (config, timing, clock offset)
+      metrics/
+        epoch_<N>_pre.txt
+        epoch_<N>_post.txt
+        epoch_<N>_delta.json
+      views/
+        epoch_boundary/     # Filtered to epoch boundary windows
+          profile.collapsed
+          flamegraph.svg
+          analysis.md
+        mid_epoch/          # Filtered to mid-epoch periods
+          ...
+        steady_state/       # Filtered to steady-state periods
+          ...
     memory/
-      epoch_boundary/
-        heap.*.heap
-        heap_analysis.md
+      heap.*.heap
+      heap_analysis.md
 ```
 
 ## Configuration
@@ -222,7 +248,7 @@ See `config.toml` for all options:
 
 ```toml
 [paths]
-lighthouse_dir = "~/work/lighthouse"
+lighthouse_dir = "~/path/to/lighthouse_dir"
 
 [lighthouse]
 network = "mainnet"
@@ -232,17 +258,18 @@ http_port = 5052
 metrics_port = 5054
 
 [profiling]
-duration_seconds = 1800
 perf_frequency = 1000
 profile = "release"
 disable_backfill = true
 output_dir = "./profiles"
 nickname = ""
+start_slot = 16
+end_slot = 15
+safety_timeout = 7200
 
 [filtering]
-epoch_boundary_warmup = 15
-epoch_boundary_cooldown = 15
-max_wait_seconds = 7200
+epoch_boundary_warmup = 6
+epoch_boundary_cooldown = 6
 
 [mock_el]
 listen_address = "127.0.0.1"
@@ -255,16 +282,14 @@ The `network` field is passed to both `lighthouse bn` and `lcli mock-el`. Suppor
 
 The `categories.toml` file defines pattern-based sample classification. Categories are checked in priority order (first match wins). See the file for the default Lighthouse categories.
 
-Categories are optional — without the file, you still get top-function analysis.
-
 ## Filters
 
-| Filter | Duration | Description |
-|--------|----------|-------------|
-| `all` | seconds | All samples from the entire run |
-| `steady-state` | seconds | Samples after sync completes |
-| `mid-epoch` | seconds | Samples NOT near epoch boundaries |
-| `epoch-boundary` | epoch count | Samples within warmup/cooldown of epoch transitions |
+| Filter | Description |
+|--------|-------------|
+| `all` | Runs all three filters below in sequence |
+| `epoch-boundary` | Samples within warmup/cooldown of epoch transitions |
+| `mid-epoch` | Samples NOT near epoch boundaries |
+| `steady-state` | Samples after sync completes, excluding epoch boundaries |
 
 ## License
 
