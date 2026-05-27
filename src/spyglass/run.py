@@ -288,13 +288,11 @@ def cmd_run(
     _cleanup_done = False
     _signal_received = False
 
-    def cleanup(signum=None, frame=None):
-        nonlocal _cleanup_done, _signal_received
+    def cleanup():
+        nonlocal _cleanup_done
         if _cleanup_done:
             return
         _cleanup_done = True
-        if signum:
-            _signal_received = True
         if progress:
             progress.stop()
         if beacon_poller:
@@ -319,6 +317,10 @@ def cmd_run(
                 except subprocess.TimeoutExpired:
                     mock_el_proc.kill()
 
+    def _signal_handler(signum, frame):
+        nonlocal _signal_received
+        _signal_received = True
+
     # Only register signal handlers from the main thread
     _in_main_thread = threading.current_thread() is threading.main_thread()
     prev_sigint = None
@@ -326,8 +328,8 @@ def cmd_run(
     if _in_main_thread:
         prev_sigint = signal.getsignal(signal.SIGINT)
         prev_sigterm = signal.getsignal(signal.SIGTERM)
-        signal.signal(signal.SIGINT, cleanup)
-        signal.signal(signal.SIGTERM, cleanup)
+        signal.signal(signal.SIGINT, _signal_handler)
+        signal.signal(signal.SIGTERM, _signal_handler)
 
     # Target PID for perf and liveness checks
     target_pid = attach_pid if attach_mode else None
@@ -419,11 +421,14 @@ def cmd_run(
 
         # === Phase 1: Wait for sync ===
         deadline = time.time() + effective_timeout
-        while time.time() < deadline and target_alive():
+        while time.time() < deadline and target_alive() and not _signal_received:
             if beacon_poller.state.sync_complete_time is not None:
                 break
             time.sleep(1.0)
-        else:
+
+        if _signal_received:
+            sys.exit(0)
+        if beacon_poller.state.sync_complete_time is None:
             if not target_alive():
                 print("\n  ERROR: Lighthouse process exited during sync")
             else:
@@ -433,11 +438,14 @@ def cmd_run(
 
         # === Phase 2: Wait for settle ===
         progress.set_phase(PHASE_SETTLING)
-        while time.time() < deadline and target_alive():
+        while time.time() < deadline and target_alive() and not _signal_received:
             if beacon_poller.settled:
                 break
             time.sleep(1.0)
-        else:
+
+        if _signal_received:
+            sys.exit(0)
+        if not beacon_poller.settled:
             if not target_alive():
                 print("\n  ERROR: Lighthouse process exited during settle")
             else:
@@ -450,19 +458,21 @@ def cmd_run(
         slot = beacon_poller.state.last_slot
         if slot is not None and (slot % SLOTS_PER_EPOCH) >= start_slot:
             wait_for_epoch = (slot // SLOTS_PER_EPOCH) + 1
-            while time.time() < deadline and target_alive():
+            while time.time() < deadline and target_alive() and not _signal_received:
                 slot = beacon_poller.state.last_slot
                 if slot is not None and (slot // SLOTS_PER_EPOCH) >= wait_for_epoch:
                     break
                 time.sleep(1.0)
 
-        while time.time() < deadline and target_alive():
+        while time.time() < deadline and target_alive() and not _signal_received:
             slot = beacon_poller.state.last_slot
             if slot is not None:
                 if (slot % SLOTS_PER_EPOCH) >= start_slot:
                     break
             time.sleep(1.0)
 
+        if _signal_received:
+            sys.exit(0)
         if not target_alive():
             print("\n  ERROR: Lighthouse process exited while waiting for start slot")
             cleanup()
@@ -498,12 +508,12 @@ def cmd_run(
             time.sleep(0.1)
 
         # === Wait for epoch capture + end slot ===
-        while time.time() < deadline and target_alive():
+        while time.time() < deadline and target_alive() and not _signal_received:
             if beacon_poller.target_reached.is_set():
                 break
             time.sleep(1.0)
 
-        while time.time() < deadline and target_alive():
+        while time.time() < deadline and target_alive() and not _signal_received:
             slot = beacon_poller.state.last_slot
             if slot is not None:
                 slot_in_epoch = slot % SLOTS_PER_EPOCH
@@ -513,6 +523,8 @@ def cmd_run(
 
         recording_end = time.time()
 
+        if _signal_received:
+            sys.exit(0)
         if not target_alive():
             print("\n  ERROR: Lighthouse process exited during profiling")
             cleanup()

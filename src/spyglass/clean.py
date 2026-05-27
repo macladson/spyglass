@@ -9,12 +9,15 @@ from .constants import format_size
 from .pr import CHECKOUTS_DIR
 
 
-def cmd_clean(config: SpyglassConfig, what: str = "all", verbose: bool = False):
+def cmd_clean(
+    config: SpyglassConfig, what: str = "all", verbose: bool = False, force: bool = False
+):
     """Remove spyglass artifacts.
 
     Args:
         config: Spyglass configuration object
         what: What to clean — "all", "checkouts", or "profiles"
+        force: Skip confirmation prompt for profiles
     """
     project_root = config.config_dir
 
@@ -31,18 +34,33 @@ def cmd_clean(config: SpyglassConfig, what: str = "all", verbose: bool = False):
         print("Nothing to clean.")
         return
 
+    # Confirm before deleting profiles (user-configured path)
+    if not force:
+        profile_targets = [(n, p) for n, p in targets if n == "profiles" and p.exists()]
+        if profile_targets:
+            path = profile_targets[0][1]
+            size = _dir_size(path)
+            print(f"This will delete {path} ({format_size(size)})")
+            try:
+                answer = input("Continue? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            if answer not in ("y", "yes"):
+                print("Aborted.")
+                return
+
     print("=== Clean ===")
     total_freed = 0
     for name, path in targets:
         if path.exists():
             size = _dir_size(path)
-            total_freed += size
             if verbose:
                 print(f"  Removing {path} ({format_size(size)})...")
             else:
                 print(f"  Removing {name}/ ({format_size(size)})")
             try:
                 shutil.rmtree(path)
+                total_freed += size
             except OSError as e:
                 print(f"  WARNING: Failed to remove {path}: {e}", file=sys.stderr)
         else:

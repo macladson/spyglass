@@ -17,11 +17,22 @@ def cmd_compare(config, dir_a: Path, dir_b: Path, filter_mode: str = "all", unit
         config: Spyglass configuration object
         dir_a: Baseline profile directory
         dir_b: Comparison profile directory
-        filter_mode: Which collapsed file to use (matches suffix convention)
+        filter_mode: Which filtered view to compare ("all" compares every available view)
         units: "pct" for percentages, "cycles" for absolute cycle counts
     """
     dir_a = Path(dir_a).resolve()
     dir_b = Path(dir_b).resolve()
+
+    if filter_mode == "all":
+        views_a = {d.name for d in (dir_a / "views").iterdir() if d.is_dir()} if (dir_a / "views").is_dir() else set()
+        views_b = {d.name for d in (dir_b / "views").iterdir() if d.is_dir()} if (dir_b / "views").is_dir() else set()
+        common = sorted(views_a & views_b)
+        if not common:
+            print("ERROR: No common views found. Run `spyglass analyze` on both profiles first.", file=sys.stderr)
+            sys.exit(1)
+        for view in common:
+            cmd_compare(config, dir_a, dir_b, filter_mode=view.replace("_", "-"), units=units)
+        return
 
     view_name = filter_mode.replace("-", "_")
     collapsed_a = dir_a / "views" / view_name / "profile.collapsed"
@@ -203,7 +214,7 @@ def _generate_diff_flamegraph(
     diff_proc = subprocess.Popen(
         ["inferno-diff-folded", "--normalize", str(collapsed_a), str(collapsed_b)],
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
     )
 
     with open(svg_path, "w") as out:
@@ -214,10 +225,11 @@ def _generate_diff_flamegraph(
             stderr=subprocess.PIPE,
         )
 
+    diff_proc.stdout.close()
     diff_proc.wait()
 
     if diff_proc.returncode != 0 or fg_proc.returncode != 0:
-        stderr = diff_proc.stderr.read().decode() + fg_proc.stderr.decode()
+        stderr = fg_proc.stderr.decode()
         print(f"  WARNING: Diff flamegraph generation failed: {stderr.strip()}", file=sys.stderr)
         svg_path.unlink(missing_ok=True)
         return None

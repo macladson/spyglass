@@ -1,14 +1,15 @@
 # Lighthouse Profile Categories
 #
-# Categories are checked in order — first match wins.
+# Categories are checked in order, first match wins.
 # A sample is assigned to a category if ANY frame in its call stack
 # contains one of the category's patterns (substring match).
 #
-# This measures "time spent in call paths involving X" — not just
-# direct CPU time in X. See the coverage report in analysis output
-# for uncategorized samples.
+# Ordering principle: specific leaf work first, broad callers last.
+# If state_processing calls store::hdiff, that's Database work, not State Processing.
 #
 # Prefix a pattern with "re:" for regex matching (e.g. "re:milhouse.*tree_hash")
+
+# --- Crypto (always leaf work, highest priority) ---
 
 [[categories]]
 name = "BLS/Crypto"
@@ -39,15 +40,114 @@ patterns = [
     "redc_mont",
     "vec_is_zero",
     "vec_select",
+    "add_n_dbl_n",
+    "raise_to_z_div_by_2",
+    "sqr_fp12",
+    "mul_by_xy00z0_fp12",
+    "cyclotomic_sqr_fp12",
+    "POINTonE2_times_minus_z",
+    "POINTonE2_in_G2",
+    "POINTonE2_mult_w5",
+    "POINTonE1_mult_w5",
+    "POINTonE2_gather_booth_w5",
+    "mul_fp12",
+    "map_to_g2",
+    "cneg_mod_384",
+    "mul_by_8_mod_384",
+    "__smulx_384",
+    "__smulx_768",
+    "__ab_approximation_31",
+    "__inner_loop_31",
+    "lshift_mod_384",
+    "sqr_n_mul_mont_383",
+    "hash_to_field",
+    "bls::",
+    "GenericSignatureSet",
+    "ct_inverse_mod_384",
+    "mul_by_3_mod_384",
+    "__tail_loop_",
+    "__smulx_191",
+    "sgn0_pty_mont",
+    "__rshift_mod_384",
+]
+
+[[categories]]
+name = "secp256k1/ENR"
+patterns = [
+    "k256::",
+    "ecdsa::",
+    "enr::",
+]
+
+[[categories]]
+name = "TLS/Noise"
+patterns = [
+    "ring_core",
+    "chacha20_poly1305",
+    "snow::",
+    "poly_hash_ad_internal",
+    "process_extra_in_trailer",
+    "__ecp_nistz256",
+]
+
+# --- Specific leaf work (before the callers that invoke them) ---
+
+[[categories]]
+name = "Database"
+patterns = ["store::", "leveldb", "store_hot_state", "store_cold_state"]
+
+[[categories]]
+name = "Tree Hash"
+patterns = ["tree_hash::"]
+
+[[categories]]
+name = "Shuffling"
+patterns = [
+    "swap_or_not_shuffle",
+    "shuffle_list",
+    "shuffling_cache",
+    "compute_proposer_index",
+]
+
+[[categories]]
+name = "Formatting/Serialization"
+patterns = [
+    "bs58::encode",
+    "hex_fmt",
+    "core::fmt::write",
+    "alloc::fmt::format",
+    "core::fmt::builders",
+    "core::fmt::num",
+    "core::fmt::Formatter",
+    "ssz::encode",
+    "ssz::decode",
+    "ssz_types::",
+]
+
+[[categories]]
+name = "Allocator"
+patterns = [
+    "_rjem_",
+    "do_rallocx",
+    "alloc::raw_vec::RawVec",
+    "alloc::raw_vec::RawVecInner",
+    "__rust_alloc_zeroed",
+    "__rust_dealloc",
+]
+
+[[categories]]
+name = "Metrics"
+patterns = [
+    "prometheus::",
+    "beacon_chain::metrics",
+    "http_metrics",
 ]
 
 [[categories]]
 name = "Tracing/Logging"
 patterns = ["tracing", "logging"]
 
-[[categories]]
-name = "Fork Choice"
-patterns = ["fork_choice"]
+# --- Milhouse (state tree internals, before State Processing) ---
 
 [[categories]]
 name = "Milhouse Iteration"
@@ -65,9 +165,35 @@ patterns = ["milhouse.*with_updated_leaves", "milhouse.*apply_updates", "re:milh
 name = "Milhouse SSZ"
 patterns = ["re:milhouse.*(ssz|builder|from_ssz)"]
 
+# --- Mid-level subsystems ---
+
 [[categories]]
-name = "Networking/libp2p"
-patterns = ["libp2p", "gossipsub", "lighthouse_network"]
+name = "Attestation Verification"
+patterns = [
+    "attestation_verification",
+    "verify_unaggregated_attestation",
+    "verify_aggregated_attestation",
+    "batch_verify_unaggregated",
+    "batch_verify_aggregated",
+    "verify_attestation_signature",
+    "IndexedUnaggregatedAttestation",
+]
+
+[[categories]]
+name = "Sync Committee"
+patterns = [
+    "sync_committee_verification",
+    "verify_sync_committee_message",
+    "SyncContributionAndProof",
+]
+
+[[categories]]
+name = "Aggregation Pool"
+patterns = [
+    "naive_aggregation_pool",
+    "operation_pool",
+    "add_to_naive_aggregation_pool",
+]
 
 [[categories]]
 name = "Block Import"
@@ -84,10 +210,56 @@ patterns = [
     "per_block_processing",
 ]
 
+# --- Broad callers (only get samples not claimed above) ---
+
 [[categories]]
 name = "State Processing"
 patterns = ["state_processing", "per_epoch", "state_advance_timer"]
 
 [[categories]]
-name = "Database"
-patterns = ["store", "leveldb"]
+name = "Fork Choice"
+patterns = ["fork_choice"]
+
+[[categories]]
+name = "Networking/libp2p"
+patterns = [
+    "libp2p",
+    "gossipsub",
+    "lighthouse_network",
+    "network::service",
+    "network::network_beacon_processor",
+]
+
+[[categories]]
+name = "Discovery"
+patterns = [
+    "discv5::",
+    "quinn::",
+    "quinn_proto::",
+    "yamux::",
+]
+
+# --- Infrastructure (broadest, catch remaining) ---
+
+[[categories]]
+name = "Tokio Runtime"
+patterns = [
+    "tokio::runtime",
+    "tokio::sync",
+    "crossbeam_channel",
+    "parking_lot",
+    "event_listener",
+    "futures_timer",
+]
+
+[[categories]]
+name = "Beacon Processor"
+patterns = ["beacon_processor::"]
+
+[[categories]]
+name = "Validator Monitor"
+patterns = ["validator_monitor"]
+
+[[categories]]
+name = "SHA-256"
+patterns = ["ethereum_hashing", "sha2::"]

@@ -109,7 +109,7 @@ def main():
     build_parser.add_argument(
         "--mode",
         "-m",
-        choices=["cpu", "memory", "both"],
+        choices=["cpu", "memory"],
         default="cpu",
         help="Profiling mode (default: cpu)",
     )
@@ -258,6 +258,12 @@ def main():
         default="checkouts",
         help="What to remove (default: checkouts)",
     )
+    clean_parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Skip confirmation prompt when deleting profiles",
+    )
 
     # --- profile (convenience) ---
     subparsers.add_parser(
@@ -353,7 +359,7 @@ def main():
         )
 
     elif args.command == "clean":
-        cmd_clean(config, what=args.what, verbose=verbose)
+        cmd_clean(config, what=args.what, verbose=verbose, force=args.force)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Interactive flame chart generation — time-series profiling across epoch boundaries."""
+"""Interactive flame chart generation: time-series profiling across epoch boundaries."""
 
 import json
 import os
@@ -86,7 +86,7 @@ def cmd_flamechart(
     bins_data = _process_perf_into_bins(perf_data, boundary_windows, num_bins, bin_size, verbose)
 
     # Category analysis per bin
-    categories = load_categories()
+    categories = load_categories(config.config_dir / "categories.toml")
     bins_categories = None
     if categories:
         print("  Categorizing samples per bin...")
@@ -160,7 +160,7 @@ def _process_perf_into_bins(
         line = raw_line.decode("utf-8", errors="replace")
 
         if line.strip() == "":
-            # End of sample block — assign to a bin
+            # End of sample block, assign to a bin
             if current_ts is not None and current_block:
                 total_samples += 1
                 bin_idx = _assign_to_bin(current_ts, boundary_windows, num_bins, bin_size)
@@ -194,6 +194,27 @@ def _process_perf_into_bins(
                 current_ts = float(m.group(1))
 
         current_block.append(line)
+
+    # Flush last sample block (perf script may not end with a blank line)
+    if current_ts is not None and current_block:
+        total_samples += 1
+        bin_idx = _assign_to_bin(current_ts, boundary_windows, num_bins, bin_size)
+        if bin_idx is not None:
+            frames = []
+            for bl in current_block[1:]:
+                bl = bl.strip()
+                if bl:
+                    parts = bl.split(" ", 1)
+                    if len(parts) >= 2:
+                        func = parts[1].rsplit(" (", 1)[0]
+                        plus_idx = func.rfind("+0x")
+                        if plus_idx > 0:
+                            func = func[:plus_idx]
+                        frames.append(func)
+            if frames:
+                stack = ";".join(reversed(frames))
+                bins[bin_idx][stack] += 1
+                binned_samples += 1
 
     proc.wait()
 
@@ -331,23 +352,33 @@ def _generate_html(
             {"name": "Uncategorized", "patterns": [], "regex_patterns": [], "leaf_patterns": []}
         )
 
-    # Category colors
     cat_colors = [
-        "#e6194b",
-        "#3cb44b",
-        "#4363d8",
-        "#f58231",
-        "#911eb4",
-        "#42d4f4",
-        "#f032e6",
-        "#bfef45",
-        "#fabed4",
-        "#469990",
-        "#dcbeff",
-        "#9A6324",
-        "#fffac8",
-        "#800000",
-        "#aaffc3",
+        "#a02020",  # BLS/Crypto: deep red
+        "#8a6838",  # secp256k1/ENR: warm brown
+        "#a89040",  # TLS/Noise: brass
+        "#684830",  # Database: espresso
+        "#30b850",  # Tree Hash: vivid green
+        "#78a030",  # Shuffling: yellow-green
+        "#9898a8",  # Formatting/Serialization: silver
+        "#48a890",  # Allocator: mint teal
+        "#e0a020",  # Metrics: bright amber
+        "#d04850",  # Tracing/Logging: coral red
+        "#7830a8",  # Milhouse Iteration: violet
+        "#a068d0",  # Milhouse Tree Hash: light purple
+        "#982880",  # Milhouse Mutations: magenta
+        "#c83878",  # Milhouse SSZ: hot pink
+        "#2a7a48",  # Attestation Verification: forest green
+        "#206878",  # Sync Committee: dark teal
+        "#3060c0",  # Aggregation Pool: royal blue
+        "#c87028",  # Block Import: burnt orange
+        "#b8a028",  # State Processing: olive gold
+        "#5050b8",  # Fork Choice: indigo
+        "#1890a8",  # Networking/libp2p: cerulean
+        "#707838",  # Discovery: khaki
+        "#607088",  # Tokio Runtime: blue grey
+        "#384050",  # Beacon Processor: gunmetal
+        "#907898",  # Validator Monitor: dusty purple
+        "#282830",  # Uncategorized: near-black
     ]
 
     max_samples = max((sum(b.values()) for b in bins_data), default=0)
@@ -370,489 +401,6 @@ def _generate_html(
         "pr_number": pr_number,
     }
 
-    html = _HTML_TEMPLATE.replace("/*DATA_PLACEHOLDER*/", json.dumps(data))
+    template_path = Path(__file__).parent / "_flamechart_template.html"
+    html = template_path.read_text().replace("/*DATA_PLACEHOLDER*/", json.dumps(data))
     output_path.write_text(html)
-
-
-_HTML_TEMPLATE = """\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>Spyglass Flame Chart</title>
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; background: #1a1a2e; color: #eee; padding: 20px; }
-h1 { font-size: 1.4em; margin-bottom: 10px; color: #fff; }
-.subtitle { color: #888; font-size: 0.85em; margin-bottom: 20px; }
-.container { max-width: 1400px; margin: 0 auto; }
-
-/* Timeline */
-.timeline { position: relative; height: 200px; margin-bottom: 20px; background: #16213e; border-radius: 8px; padding: 10px 10px 10px 60px; }
-.timeline-title { font-size: 0.8em; color: #888; margin-bottom: 5px; }
-.y-axis { position: absolute; left: 6px; top: 28px; bottom: 30px; width: 48px; display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; padding-right: 4px; font-size: 0.6em; color: #666; }
-.stacked-chart { position: relative; height: 150px; display: flex; align-items: end; gap: 1px; }
-.bin-bar { display: flex; flex-direction: column-reverse; flex: 1; cursor: pointer; border-radius: 2px 2px 0 0; overflow: hidden; opacity: 0.8; transition: opacity 0.1s; }
-.bin-bar:hover, .bin-bar.active { opacity: 1; }
-.bin-segment { width: 100%; transition: height 0.1s; }
-.epoch-marker { position: absolute; top: 0; bottom: 20px; width: 2px; background: #fff3; z-index: 5; }
-.epoch-marker::after { content: "epoch boundary"; position: absolute; top: -18px; left: 4px; font-size: 0.65em; color: #888; white-space: nowrap; }
-.time-axis { display: flex; justify-content: space-between; font-size: 0.7em; color: #666; margin-top: 4px; }
-
-/* Slider */
-.slider-container { margin-bottom: 20px; padding-left: 60px; }
-.slider-container input[type=range] { width: 100%; cursor: pointer; }
-.slider-label { display: flex; justify-content: space-between; font-size: 0.8em; color: #888; }
-
-/* Units toggle */
-.units-toggle { font-size: 0.75em; color: #888; cursor: pointer; padding: 3px 8px; border: 1px solid #444; border-radius: 3px; background: none; transition: all 0.1s; }
-.units-toggle:hover { border-color: #4fc3f7; color: #4fc3f7; }
-
-/* Main content */
-.content { display: grid; grid-template-columns: 1fr 300px; gap: 20px; }
-.flamegraph-panel { background: #16213e; border-radius: 8px; padding: 15px; }
-.sidebar { background: #16213e; border-radius: 8px; padding: 15px; }
-.sidebar h3 { font-size: 0.9em; margin-bottom: 10px; color: #ccc; }
-
-/* Functions table */
-.func-table { width: 100%; font-size: 0.75em; }
-.func-table tr { cursor: pointer; transition: background 0.1s; }
-.func-table tr:hover { background: #ffffff10; }
-.func-table tr.active { background: #ffffff20; }
-.func-table td { padding: 3px 5px; border-bottom: 1px solid #ffffff10; }
-.func-table .pct { text-align: right; color: #4fc3f7; font-weight: bold; white-space: nowrap; }
-.func-table .name { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ccc; }
-
-/* Category legend */
-.cat-legend { margin-bottom: 15px; }
-.cat-item { display: flex; align-items: center; gap: 6px; font-size: 0.75em; margin-bottom: 3px; padding: 2px 4px; border-radius: 3px; transition: background 0.1s, opacity 0.1s; cursor: pointer; }
-.cat-item:hover { background: #ffffff10; }
-.cat-item.active { background: #ffffff20; outline: 1px solid #4fc3f7; }
-.cat-item.dimmed { opacity: 0.4; }
-.cat-swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
-.cat-pct { color: #4fc3f7; min-width: 40px; text-align: right; }
-.clear-btn { font-size: 0.7em; color: #4fc3f7; cursor: pointer; margin-left: auto; padding: 2px 8px; border: 1px solid #4fc3f7; border-radius: 3px; display: none; }
-.clear-btn:hover { background: #4fc3f7; color: #1a1a2e; }
-
-/* Flamegraph */
-.fg-container { width: 100%; overflow-x: auto; }
-.fg-frame { stroke: #1a1a2e; stroke-width: 0.5px; cursor: pointer; }
-.fg-frame:hover { stroke: #fff; stroke-width: 1px; }
-.fg-label { font-size: 11px; fill: #fff; pointer-events: none; }
-.fg-info { font-size: 0.8em; color: #888; margin-bottom: 10px; }
-
-/* Playback */
-.controls { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.controls button { background: #4fc3f7; border: none; color: #1a1a2e; padding: 5px 15px; border-radius: 4px; cursor: pointer; font-weight: bold; }
-.controls button:hover { background: #81d4fa; }
-.controls .time-display { font-size: 1.1em; font-weight: bold; color: #4fc3f7; min-width: 80px; }
-</style>
-</head>
-<body>
-<div class="container">
-<h1 id="title">Spyglass Flame Chart</h1>
-<div class="subtitle" id="subtitle"></div>
-
-<div class="controls">
-  <button id="play-btn" onclick="togglePlay()">▶ Play</button>
-  <span class="time-display" id="time-display">-6.00s</span>
-  <span style="color:#666;font-size:0.8em" id="sample-count"></span>
-  <button class="units-toggle" id="units-toggle" onclick="toggleUnits()">show cpu-sec</button>
-</div>
-
-<div class="timeline">
-  <div class="timeline-title">Category breakdown over time</div>
-  <div class="y-axis" id="y-axis"></div>
-  <div class="stacked-chart" id="stacked-chart"></div>
-  <div class="time-axis" id="time-axis"></div>
-</div>
-
-<div class="slider-container">
-  <input type="range" id="bin-slider" min="0" max="23" value="0" oninput="selectBin(+this.value)">
-  <div class="slider-label"><span id="slider-start"></span><span>epoch boundary</span><span id="slider-end"></span></div>
-</div>
-
-<div class="content">
-  <div class="flamegraph-panel">
-    <div class="fg-info" id="fg-info"></div>
-    <div class="fg-container" id="fg-container"></div>
-  </div>
-  <div class="sidebar">
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-      <h3 style="margin:0">Categories</h3>
-      <span class="clear-btn" id="clear-filters" onclick="clearFilters()">clear</span>
-    </div>
-    <div class="cat-legend" id="cat-legend"></div>
-    <h3>Top Functions</h3>
-    <table class="func-table" id="func-table"></table>
-  </div>
-</div>
-</div>
-
-<script>
-const DATA = /*DATA_PLACEHOLDER*/;
-let currentBin = 0;
-let playing = false;
-let playInterval = null;
-const UNIT_CYCLES = 0, UNIT_SECONDS = 1, UNIT_PCT = 2;
-const UNIT_LABELS = ["cycles", "cpu-sec", "%"];
-let unitMode = UNIT_CYCLES;
-
-function init() {
-  // Title with nickname and optional PR link
-  const titleEl = document.getElementById("title");
-  if (DATA.nickname) {
-    if (DATA.pr_number) {
-      titleEl.innerHTML = `Spyglass Flame Chart &mdash; <a href="https://github.com/sigp/lighthouse/pull/${DATA.pr_number}" style="color:#4fc3f7;text-decoration:none">${DATA.nickname}</a>`;
-    } else {
-      titleEl.textContent = `Spyglass Flame Chart — ${DATA.nickname}`;
-    }
-  }
-  document.getElementById("subtitle").textContent =
-    `${DATA.epochs.length} epoch(s) overlaid | ${DATA.window}s window (${DATA.warmup}s + ${DATA.cooldown}s) | ${DATA.bin_size}s bins`;
-  document.getElementById("bin-slider").max = DATA.num_bins - 1;
-  document.getElementById("slider-start").textContent = `-${DATA.warmup}s`;
-  document.getElementById("slider-end").textContent = `+${DATA.cooldown}s`;
-  buildStackedChart();
-  buildCategoryLegend();
-  selectBin(0);
-}
-
-function formatCount(n) {
-  if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
-  return n.toString();
-}
-
-function formatSeconds(n) {
-  if (n >= 60) return (n / 60).toFixed(1) + "m";
-  if (n >= 1) return n.toFixed(1) + "s";
-  if (n >= 0.001) return (n * 1000).toFixed(0) + "ms";
-  return "0s";
-}
-
-function formatValue(samples, pct) {
-  if (unitMode === UNIT_CYCLES) return formatCount(samples);
-  if (unitMode === UNIT_SECONDS && DATA.perf_frequency) return formatSeconds(samples / DATA.perf_frequency);
-  if (unitMode === UNIT_PCT) return pct.toFixed(1) + "%";
-  return formatCount(samples);
-}
-
-function buildYAxis() {
-  const yAxis = document.getElementById("y-axis");
-  yAxis.innerHTML = "";
-  const max = DATA.max_samples;
-  [1.0, 0.75, 0.5, 0.25, 0].forEach(frac => {
-    const tick = document.createElement("div");
-    const val = Math.round(max * frac);
-    tick.textContent = formatValue(val, frac * 100);
-    yAxis.appendChild(tick);
-  });
-}
-
-function buildStackedChart() {
-  const chart = document.getElementById("stacked-chart");
-  const maxSamples = Math.max(...DATA.bins.map(b => b.total_samples));
-
-  buildYAxis();
-
-  for (let i = 0; i < DATA.num_bins; i++) {
-    const bin = DATA.bins[i];
-    const bar = document.createElement("div");
-    bar.className = "bin-bar";
-    bar.dataset.bin = i;
-    bar.onclick = () => { selectBin(i); document.getElementById("bin-slider").value = i; };
-
-    const barHeight = (bin.total_samples / maxSamples) * 100;
-    bar.style.height = barHeight + "%";
-
-    // Stack category segments
-    DATA.category_names.forEach((cat, ci) => {
-      const pct = bin.categories[cat] || 0;
-      if (pct > 0) {
-        const seg = document.createElement("div");
-        seg.className = "bin-segment";
-        seg.dataset.cat = ci;
-        seg.style.height = pct + "%";
-        seg.style.background = DATA.category_colors[ci % DATA.category_colors.length];
-        bar.appendChild(seg);
-      }
-    });
-
-    chart.appendChild(bar);
-  }
-
-  // Epoch boundary marker
-  const markerPos = (DATA.warmup / DATA.window) * 100;
-  const marker = document.createElement("div");
-  marker.className = "epoch-marker";
-  marker.style.left = markerPos + "%";
-  chart.appendChild(marker);
-
-  // Time axis
-  const axis = document.getElementById("time-axis");
-  for (let t = -DATA.warmup; t <= DATA.cooldown; t += (DATA.window / 4)) {
-    const span = document.createElement("span");
-    span.textContent = (t >= 0 ? "+" : "") + t.toFixed(1) + "s";
-    axis.appendChild(span);
-  }
-}
-
-function buildCategoryLegend() {
-  // Initial render — will be re-sorted on each selectBin call
-}
-
-function selectBin(idx) {
-  currentBin = idx;
-  const bin = DATA.bins[idx];
-
-  // Update active bar
-  document.querySelectorAll(".bin-bar").forEach((b, i) => {
-    b.classList.toggle("active", i === idx);
-  });
-
-  // Time display
-  document.getElementById("time-display").textContent =
-    (bin.t_start >= 0 ? "+" : "") + bin.t_start.toFixed(2) + "s";
-  document.getElementById("sample-count").textContent =
-    bin.total_samples.toLocaleString() + " samples";
-
-  // Categories — sort by sample count descending
-  const legend = document.getElementById("cat-legend");
-  const catEntries = DATA.category_names.map((cat, ci) => ({
-    name: cat, ci, pct: bin.categories[cat] || 0,
-    samples: Math.round(bin.total_samples * (bin.categories[cat] || 0) / 100),
-  })).sort((a, b) => b.samples - a.samples);
-  const hasFilters = activeCategories.size > 0 || activeFunctions.size > 0;
-  legend.innerHTML = catEntries.map(({name, ci, pct, samples}) => {
-    const isActive = activeCategories.has(ci);
-    const dimmed = hasFilters && !isActive ? ' dimmed' : '';
-    return `<div class="cat-item${isActive ? ' active' : ''}${dimmed}" onclick="toggleCategory(${ci})">` +
-      `<div class="cat-swatch" style="background:${DATA.category_colors[ci]}"></div>` +
-      `<span class="cat-pct">${formatValue(samples, pct)}</span><span>${name}</span></div>`;
-  }).join("");
-
-  // Top functions
-  const table = document.getElementById("func-table");
-  table.innerHTML = bin.top_functions.map((f, fi) => {
-    const isActive = activeFunctions.has(f.name);
-    return `<tr class="${isActive ? 'active' : ''}" onclick="toggleFunction(${fi})">` +
-      `<td class="pct">${formatValue(f.samples, f.pct)}</td>` +
-      `<td class="name" title="${escHtml(f.name)}">${escHtml(f.name)}</td></tr>`;
-  }).join("");
-
-  // Update clear button visibility
-  document.getElementById("clear-filters").style.display = hasFilters ? '' : 'none';
-
-  // Flamegraph
-  renderFlamegraph(idx);
-}
-
-function renderFlamegraph(idx) {
-  const container = document.getElementById("fg-container");
-  const collapsed = DATA.bins_collapsed[idx];
-  if (!collapsed || collapsed.length === 0) {
-    container.innerHTML = '<div style="color:#666;padding:20px">No samples in this bin</div>';
-    return;
-  }
-
-  // Build tree from collapsed stacks
-  const root = {name: "all", value: 0, children: {}};
-  for (const [stack, count] of collapsed) {
-    const frames = stack.split(";");
-    let node = root;
-    node.value += count;
-    for (const frame of frames) {
-      if (!node.children[frame]) {
-        node.children[frame] = {name: frame, value: 0, children: {}};
-      }
-      node = node.children[frame];
-      node.value += count;
-    }
-  }
-
-  // Collapse single-child chains: skip frames where one child has >80% of
-  // the parent's value. This removes uninformative runtime wrapper layers
-  // (tokio runtime, thread start, [unknown], etc.) and starts where branching occurs.
-  function collapse(node) {
-    const children = Object.values(node.children);
-    if (children.length === 1 && children[0].value > node.value * 0.80) {
-      return collapse(children[0]);
-    }
-    // Also collapse if the top child dominates and others are negligible
-    if (children.length > 1) {
-      const sorted = children.sort((a,b) => b.value - a.value);
-      if (sorted[0].value > node.value * 0.80) {
-        return collapse(sorted[0]);
-      }
-    }
-    return node;
-  }
-  const displayRoot = collapse(root);
-
-  // Flatten tree for rendering
-  const width = container.clientWidth || 900;
-  const frameH = 18;
-  const rects = [];
-  const totalValue = displayRoot.value;
-
-  function layout(node, x, y, w) {
-    if (w < 2) return; // Skip frames narrower than 2px
-    rects.push({name: node.name, x, y, w, value: node.value});
-    let childX = x;
-    const childEntries = Object.values(node.children).sort((a,b) => b.value - a.value);
-    for (const child of childEntries) {
-      const childW = (child.value / node.value) * w;
-      layout(child, childX, y + frameH, childW);
-      childX += childW;
-    }
-  }
-
-  layout(displayRoot, 0, 0, width);
-  const maxY = rects.length ? Math.max(...rects.map(r => r.y)) + frameH : frameH;
-
-  // Render SVG — icicle style (root at top, stacks grow downward)
-  const svg = rects.map(r => {
-    const pct = (100 * r.value / totalValue).toFixed(1);
-    const hue = hashColor(r.name);
-    const esc = escSvg(truncate(r.name, r.w));
-    const label = r.w > 40 ? `<text class="fg-label" x="${r.x+2}" y="${r.y + 13}">${esc}</text>` : "";
-    return `<rect class="fg-frame" x="${r.x}" y="${r.y}" width="${r.w}" height="${frameH - 1}"
-      fill="hsl(${hue},60%,45%)"><title>${escSvg(r.name)}\\n${pct}% (${r.value.toLocaleString()} samples)</title></rect>${label}`;
-  }).join("");
-
-  container.innerHTML = `<svg width="${width}" height="${maxY + 5}" style="display:block">${svg}</svg>`;
-  document.getElementById("fg-info").textContent =
-    `${collapsed.length} unique stacks | ${totalValue.toLocaleString()} samples`;
-  if (activeCategories.size > 0 || activeFunctions.size > 0) applyHighlight();
-}
-
-function hashColor(str) {
-  // Strip generic parameters so the same function gets the same color
-  // across builds with different generic args (e.g. Tree<T> vs Tree<T,_>)
-  const stripped = str.replace(/<[^>]*>/g, '');
-  let h = 0;
-  for (let i = 0; i < stripped.length; i++) h = ((h << 5) - h + stripped.charCodeAt(i)) | 0;
-  return Math.abs(h) % 360;
-}
-
-function escSvg(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function truncate(s, maxW) {
-  const maxChars = Math.floor(maxW / 7);
-  return s.length <= maxChars ? s : s.slice(0, maxChars - 1) + "\u2026";
-}
-
-function togglePlay() {
-  playing = !playing;
-  document.getElementById("play-btn").textContent = playing ? "\u23f8 Pause" : "\u25b6 Play";
-  if (playing) {
-    playInterval = setInterval(() => {
-      const next = (currentBin + 1) % DATA.num_bins;
-      document.getElementById("bin-slider").value = next;
-      selectBin(next);
-      if (next === 0) togglePlay(); // Stop at end
-    }, 300);
-  } else {
-    clearInterval(playInterval);
-  }
-}
-
-function toggleUnits() {
-  unitMode = (unitMode + 1) % 3;
-  if (unitMode === UNIT_SECONDS && !DATA.perf_frequency) unitMode = (unitMode + 1) % 3;
-  const next = UNIT_LABELS[(unitMode + 1) % 3];
-  document.getElementById("units-toggle").textContent = `show ${next}`;
-  buildYAxis();
-  selectBin(currentBin);
-}
-
-let activeCategories = new Set();
-let activeFunctions = new Set();
-
-function toggleCategory(ci) {
-  if (activeCategories.has(ci)) {
-    activeCategories.delete(ci);
-  } else {
-    activeCategories.add(ci);
-  }
-  applyHighlight();
-  selectBin(currentBin); // re-render sidebar
-}
-
-function toggleFunction(fi) {
-  const bin = DATA.bins[currentBin];
-  const name = bin.top_functions[fi].name;
-  if (activeFunctions.has(name)) {
-    activeFunctions.delete(name);
-  } else {
-    activeFunctions.add(name);
-  }
-  applyHighlight();
-  selectBin(currentBin); // re-render sidebar
-}
-
-function clearFilters() {
-  activeCategories.clear();
-  activeFunctions.clear();
-  applyHighlight();
-  selectBin(currentBin);
-}
-
-function applyHighlight() {
-  const frames = document.querySelectorAll(".fg-frame");
-  const segments = document.querySelectorAll(".bin-segment");
-  const hasFilters = activeCategories.size > 0 || activeFunctions.size > 0;
-  if (!hasFilters) {
-    frames.forEach(f => { f.style.opacity = ""; });
-    segments.forEach(s => { s.style.opacity = ""; });
-    return;
-  }
-  // Highlight flamegraph frames
-  frames.forEach(f => {
-    const title = f.querySelector("title");
-    if (!title) { f.style.opacity = "0.15"; return; }
-    const name = title.textContent.split("\\n")[0];
-    f.style.opacity = frameMatchesFilters(name) ? "1" : "0.15";
-  });
-  // Highlight timeline segments
-  if (activeCategories.size > 0) {
-    segments.forEach(s => {
-      s.style.opacity = activeCategories.has(+s.dataset.cat) ? "1" : "0.15";
-    });
-  } else {
-    segments.forEach(s => { s.style.opacity = ""; });
-  }
-}
-
-function frameMatchesFilters(frameName) {
-  // Check function name filters
-  for (const fn of activeFunctions) {
-    if (frameName.includes(fn)) return true;
-  }
-  // Check category filters
-  for (const ci of activeCategories) {
-    const cat = DATA.category_patterns[ci];
-    if (!cat) continue;
-    for (const p of cat.patterns) {
-      if (frameName.includes(p)) return true;
-    }
-    for (const rp of cat.regex_patterns) {
-      if (new RegExp(rp).test(frameName)) return true;
-    }
-  }
-  return false;
-}
-
-function escHtml(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-init();
-</script>
-</body>
-</html>
-"""

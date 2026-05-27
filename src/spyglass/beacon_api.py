@@ -296,10 +296,13 @@ class BeaconApiPoller:
         """Check if the node has finished syncing."""
         syncing = self._get_syncing()
         if syncing is not None and not syncing:
+            just_completed = False
             with self._lock:
                 if self.state.sync_complete_time is None:
                     self.state.sync_complete_time = now
-                    self._on_sync_complete()
+                    just_completed = True
+            if just_completed:
+                self._on_sync_complete()
 
     def _on_sync_complete(self):
         """Called when sync completes. Takes a steady-state baseline snapshot."""

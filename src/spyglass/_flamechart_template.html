@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Spyglass Flame Chart</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: ui-monospace, "SF Mono", Menlo, monospace; background: #0f172a; color: #e2e8f0; font-size: 13px; }
+
+/* Header */
+.header { border-bottom: 1px solid #1e293b; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; background: #0f172a; }
+.header-left { display: flex; align-items: center; gap: 12px; }
+.header h1 { font-size: 14px; font-weight: 700; letter-spacing: 0.02em; }
+.header h1 a { color: #38bdf8; text-decoration: none; }
+.header h1 a:hover { text-decoration: underline; }
+.badge { font-size: 9px; padding: 2px 6px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.05em; }
+.badge-brush { background: rgba(249,115,22,0.15); color: #fb923c; border: 1px solid rgba(249,115,22,0.2); }
+
+/* Stats bar */
+.stats-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: #1e293b; border-bottom: 1px solid #1e293b; }
+.stat { background: #0f172a; padding: 8px 16px; }
+.stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; }
+.stat-value { font-size: 13px; font-weight: 700; color: #e2e8f0; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Timeline */
+.timeline-wrap { padding: 12px 24px; border-bottom: 1px solid #1e293b; background: #0f172a; user-select: none; }
+.timeline-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.timeline-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; }
+.timeline-info { font-size: 11px; color: #64748b; }
+.timeline-info .hl { color: #f97316; }
+.timeline-body { display: flex; gap: 0; }
+.y-axis { width: 48px; flex-shrink: 0; display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; padding-right: 6px; font-size: 9px; color: #475569; }
+.timeline-chart { position: relative; height: 140px; cursor: crosshair; display: flex; align-items: flex-end; gap: 1px; flex: 1; min-width: 0; }
+.bin-bar { display: flex; flex-direction: column-reverse; flex: 1; border-radius: 2px 2px 0 0; overflow: hidden; opacity: 0.85; transition: opacity 0.1s; min-width: 0; }
+.bin-bar:hover { opacity: 1; }
+.bin-seg { width: 100%; }
+.epoch-line { position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(255,255,255,0.15); z-index: 2; pointer-events: none; }
+.epoch-label { position: absolute; top: -18px; left: 4px; font-size: 9px; color: #475569; white-space: nowrap; pointer-events: none; letter-spacing: 0.04em; }
+.timeline-axis { display: flex; justify-content: space-between; font-size: 10px; color: #475569; margin-top: 4px; }
+.brush-overlay { position: absolute; top: 0; bottom: 0; background: rgba(15,23,42,0.7); pointer-events: none; }
+.brush-window { position: absolute; top: 0; bottom: 0; border-left: 2px solid #f97316; border-right: 2px solid #f97316; background: rgba(249,115,22,0.03); cursor: grab; }
+.brush-window:active { cursor: grabbing; }
+.brush-handle { position: absolute; top: 0; bottom: 0; width: 8px; cursor: ew-resize; z-index: 3; }
+.brush-handle-l { left: -4px; }
+.brush-handle-r { right: -4px; }
+
+/* Controls bar */
+.controls-bar { padding: 8px 24px; border-bottom: 1px solid #1e293b; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: #0f172a; }
+.search-box { position: relative; flex: 1; max-width: 320px; min-width: 160px; }
+.search-box input { width: 100%; background: #1e293b; border: 1px solid #334155; border-radius: 4px; padding: 5px 8px 5px 28px; font-size: 11px; color: #e2e8f0; outline: none; font-family: inherit; }
+.search-box input:focus { border-color: #f97316; }
+.search-box svg { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: #64748b; }
+.btn-group { display: flex; border: 1px solid #334155; border-radius: 4px; overflow: hidden; }
+.btn-group button { padding: 5px 12px; font-size: 11px; border: none; cursor: pointer; font-family: inherit; transition: all 0.1s; }
+.btn-group button.active { background: #f97316; color: #fff; }
+.btn-group button:not(.active) { background: #1e293b; color: #94a3b8; }
+.btn-group button:not(.active):hover { background: #334155; }
+.btn { padding: 5px 12px; font-size: 11px; border: 1px solid #334155; border-radius: 4px; background: #1e293b; color: #94a3b8; cursor: pointer; font-family: inherit; }
+.btn:hover { border-color: #38bdf8; color: #38bdf8; }
+.controls-status { font-size: 11px; color: #64748b; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.controls-status .hl { color: #f97316; }
+
+/* Main grid */
+.main { display: grid; grid-template-columns: 1fr 300px; gap: 1px; background: #1e293b; }
+.fg-panel { background: #0f172a; padding: 16px; position: relative; min-height: 200px; overflow-x: auto; overflow-y: hidden; }
+.detail-panel { background: #0f172a; padding: 16px; }
+.panel-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; margin-bottom: 8px; }
+
+/* Flamegraph */
+.fg-frame { cursor: pointer; transition: opacity 0.1s; }
+.fg-frame:hover rect { stroke: #fff; stroke-width: 1px; }
+.fg-label { font-size: 10px; fill: #fff; pointer-events: none; }
+.fg-tooltip { position: fixed; pointer-events: none; background: #1e293b; border: 1px solid #334155; border-radius: 4px; padding: 6px 10px; font-size: 11px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); z-index: 50; max-width: 400px; }
+.fg-tooltip .fn { font-weight: 700; color: #e2e8f0; word-break: break-all; }
+.fg-tooltip .file { font-size: 10px; color: #64748b; }
+.fg-tooltip .metrics { display: flex; gap: 12px; margin-top: 4px; font-size: 10px; }
+.fg-tooltip .metrics .v { color: #f97316; }
+
+/* Detail panel */
+.detail-name { font-size: 12px; font-weight: 700; color: #e2e8f0; word-break: break-all; }
+.detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.detail-card { background: #1e293b; border-radius: 4px; padding: 8px; }
+.detail-card .label { font-size: 9px; text-transform: uppercase; color: #64748b; }
+.detail-card .val { font-size: 13px; font-weight: 700; margin-top: 2px; }
+.detail-card .sub { font-size: 10px; color: #64748b; }
+.detail-callees { margin-top: 16px; }
+.callee-row { display: flex; justify-content: space-between; font-size: 11px; padding: 3px 6px; border-radius: 3px; cursor: pointer; }
+.callee-row:hover { background: rgba(30,41,59,0.5); }
+.detail-empty { font-size: 11px; color: #64748b; font-style: italic; }
+.detail-cat-badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 10px; color: #e2e8f0; margin-top: 10px; }
+.panel-header { display: flex; align-items: center; justify-content: space-between; }
+.panel-header .panel-label { margin-bottom: 0; }
+.empty-msg { color: #64748b; padding: 20px; font-style: italic; }
+.callee-name { color: #94a3b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.callee-val { color: #64748b; white-space: nowrap; margin-left: 8px; }
+
+/* Function table */
+.table-wrap { background: #0f172a; padding: 16px 24px; overflow-x: hidden; }
+.func-table { width: 100%; font-size: 11px; border-collapse: collapse; table-layout: fixed; }
+.func-table th { text-align: left; padding: 6px 8px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; font-weight: 400; border-bottom: 1px solid #1e293b; cursor: pointer; user-select: none; }
+.func-table th:hover { color: #94a3b8; }
+.func-table td { padding: 4px 8px; border-bottom: 1px solid rgba(30,41,59,0.3); }
+.func-table tr { cursor: pointer; transition: background 0.1s; }
+.func-table tr:hover { background: rgba(30,41,59,0.5); }
+.func-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.func-name .swatch { width: 6px; height: 6px; border-radius: 2px; flex-shrink: 0; }
+.func-name .name { color: #e2e8f0; word-break: break-all; }
+.func-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.self-val { color: #fbbf24; }
+.total-val { color: #f97316; }
+.pct-bar { display: flex; align-items: center; gap: 6px; }
+.pct-bar-bg { width: 60px; height: 3px; background: #1e293b; border-radius: 2px; overflow: hidden; flex-shrink: 0; }
+.pct-bar-fg { height: 100%; background: #f97316; }
+.pct-bar-val { font-size: 10px; color: #64748b; font-variant-numeric: tabular-nums; }
+
+/* Clear links */
+.clear-link { font-size: 10px; color: #64748b; text-decoration: none; cursor: pointer; }
+.clear-link:hover { color: #94a3b8; }
+
+/* Category legend */
+.cat-legend-row { display: flex; align-items: center; gap: 6px; font-size: 11px; padding: 2px 0; cursor: pointer; }
+.cat-legend-row:hover { background: rgba(255,255,255,0.03); }
+.cat-legend-row.active { background: rgba(56,189,248,0.08); border-radius: 3px; }
+.cat-legend-row.dimmed { opacity: 0.3; }
+.cat-legend-row .sw { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.cat-legend-row .cat-name { flex: 1; color: #94a3b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cat-legend-row .cat-val { color: #38bdf8; font-variant-numeric: tabular-nums; text-align: right; min-width: 50px; }
+
+/* Category chips */
+.cat-bar { display: flex; gap: 4px; flex-wrap: wrap; }
+.cat-chip { display: flex; align-items: center; gap: 4px; font-size: 10px; padding: 2px 8px; border-radius: 3px; cursor: pointer; transition: all 0.1s; border: 1px solid transparent; color: #94a3b8; }
+.cat-chip:hover { background: rgba(255,255,255,0.05); }
+.cat-chip.active { border-color: #38bdf8; background: rgba(56,189,248,0.06); color: #e2e8f0; }
+.cat-chip.dimmed { opacity: 0.3; }
+.cat-chip .sw { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+
+.footer { padding: 8px 24px; border-top: 1px solid #1e293b; font-size: 10px; color: #475569; text-align: center; }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="header-left">
+    <h1 id="title">Spyglass Flame Chart</h1>
+    <span class="badge badge-brush" id="brush-badge" style="display:none">Brushed</span>
+  </div>
+  <button class="btn" id="units-toggle" onclick="toggleUnits()">show cpu-sec</button>
+</header>
+
+<div class="stats-bar" id="stats-bar"></div>
+
+<div class="timeline-wrap">
+  <div class="timeline-header">
+    <span class="timeline-label">CPU activity over time</span>
+    <span class="timeline-info" id="timeline-info"></span>
+  </div>
+  <div class="timeline-body">
+    <div class="y-axis" id="y-axis"></div>
+    <div style="flex:1;min-width:0">
+      <div class="timeline-chart" id="timeline-chart"></div>
+      <div class="timeline-axis" id="timeline-axis"></div>
+    </div>
+  </div>
+</div>
+
+<div class="controls-bar">
+  <div class="search-box">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+    <input id="search-input" placeholder="Search functions..." oninput="onSearch(this.value)">
+  </div>
+  <button class="btn" id="play-btn" onclick="togglePlay()">&#9654; Play</button>
+  <div class="btn-group">
+    <button id="btn-topdown" class="active" onclick="setView('top-down')">Top-down</button>
+    <button id="btn-bottomup" onclick="setView('bottom-up')">Bottom-up</button>
+  </div>
+  <button class="btn" id="btn-collapse" onclick="toggleCollapse()">Show all frames</button>
+  <div class="cat-bar" id="cat-bar"></div>
+  <span class="controls-status" id="controls-status"></span>
+</div>
+
+<div class="main">
+  <div class="fg-panel">
+    <div class="panel-label" id="fg-label">Flame Graph</div>
+    <div id="fg-container" style="overflow-x:auto"></div>
+  </div>
+  <div class="detail-panel" id="detail-panel">
+    <div class="panel-header">
+      <div class="panel-label">Categories</div>
+      <a href="#" class="clear-link" id="cat-clear-btn" style="display:none" onclick="clearCats();return false">clear</a>
+    </div>
+    <div id="cat-legend" style="margin-top:6px"></div>
+    <div class="panel-label" style="margin-top:16px">Frame Details</div>
+    <div id="detail-content" class="detail-empty">Click a frame to inspect.</div>
+  </div>
+</div>
+
+<div class="fg-tooltip" id="tooltip" style="display:none"></div>
+
+<div class="table-wrap">
+  <div class="panel-label" id="table-label">Functions</div>
+  <table class="func-table" id="func-table">
+    <colgroup>
+      <col>
+      <col style="width:90px">
+      <col style="width:90px">
+      <col style="width:130px">
+    </colgroup>
+    <thead><tr>
+      <th onclick="sortTable('name')">Function</th>
+      <th onclick="sortTable('self')" style="text-align:right">Self</th>
+      <th onclick="sortTable('total')" style="text-align:right">Total</th>
+      <th onclick="sortTable('pct')" style="text-align:right">% of Total</th>
+    </tr></thead>
+    <tbody id="func-tbody"></tbody>
+  </table>
+</div>
+
+<div class="footer">Drag on timeline to brush · Click frame to zoom · Toggle bottom-up for hot leaf functions</div>
+
+<script>
+const DATA = /*DATA_PLACEHOLDER*/;
+
+let brushRange = null;
+let zoomNode = null;
+let selectedNode = null;
+let searchTerm = '';
+let viewMode = 'top-down';
+let tableSortBy = 'self';
+let tableSortDir = 'desc';
+const U_PCT = 0, U_SEC = 1;
+const U_LABELS = ["%", "cpu-sec"];
+let unitMode = U_PCT;
+let activeCategories = new Set();
+let currentTree = null;
+let currentTotal = 0;
+let collapseEnabled = true;
+
+function fmtCount(n) {
+  if (n >= 1e9) return (n/1e9).toFixed(1)+"B";
+  if (n >= 1e6) return (n/1e6).toFixed(1)+"M";
+  if (n >= 1e3) return (n/1e3).toFixed(1)+"K";
+  return n.toLocaleString();
+}
+function fmtSec(n) {
+  if (n >= 60) return (n/60).toFixed(1)+"m";
+  if (n >= 1) return n.toFixed(1)+"s";
+  if (n >= 0.001) return (n*1000).toFixed(0)+"ms";
+  return "0s";
+}
+function fmtVal(samples, pct) {
+  if (unitMode===U_SEC && DATA.perf_frequency) return fmtSec(samples/DATA.perf_frequency);
+  if (unitMode===U_PCT) return (pct||0).toFixed(1)+"%";
+  if (DATA.perf_frequency) return fmtSec(samples/DATA.perf_frequency);
+  return fmtCount(samples);
+}
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function hashColor(s) {
+  s = s.replace(/<[^>]*>/g,'');
+  let h=0; for(let i=0;i<s.length;i++) h=((h<<5)-h+s.charCodeAt(i))|0;
+  return Math.abs(h)%360;
+}
+function catColor(name) {
+  const ci = DATA.category_names.indexOf(name);
+  return ci >= 0 ? DATA.category_colors[ci % DATA.category_colors.length] : '#475569';
+}
+function frameCat(name) {
+  for (const cat of DATA.category_patterns||[]) {
+    for (const p of cat.patterns) if (name.includes(p)) return cat.name;
+    for (const rp of cat.regex_patterns) if (new RegExp(rp).test(name)) return cat.name;
+  }
+  return 'Uncategorized';
+}
+function frameMatchesAnyCat(name) {
+  for (const ci of activeCategories) {
+    const cat = DATA.category_patterns[ci]; if (!cat) continue;
+    for (const p of cat.patterns) if (name.includes(p)) return true;
+    for (const rp of cat.regex_patterns) if (new RegExp(rp).test(name)) return true;
+  }
+  return false;
+}
+
+// === Tree building ===
+function mergeCollapsed(s, e) {
+  const m = {};
+  for (let i=s; i<=e; i++) for (const [stack,count] of DATA.bins_collapsed[i]) m[stack] = (m[stack]||0)+count;
+  return m;
+}
+function buildTree(col) {
+  const root = {name:"(all)", value:0, self:0, children:{}, cats:{}};
+  for (const [stack,count] of Object.entries(col)) {
+    const frames = stack.split(";");
+    const ci = categorizeSample(stack);
+    let n = root; n.value += count;
+    if (ci >= 0) n.cats[ci] = (n.cats[ci]||0) + count;
+    for (let i=0; i<frames.length; i++) {
+      const f = frames[i];
+      if (!n.children[f]) n.children[f] = {name:f, value:0, self:0, children:{}, cats:{}};
+      n = n.children[f]; n.value += count;
+      if (ci >= 0) n.cats[ci] = (n.cats[ci]||0) + count;
+      if (i === frames.length-1) n.self += count;
+    }
+  }
+  return root;
+}
+function collapseChain(n) {
+  const ch = Object.values(n.children);
+  if (ch.length===1 && ch[0].value > n.value*0.80) return collapseChain(ch[0]);
+  if (ch.length>1) { ch.sort((a,b)=>b.value-a.value); if (ch[0].value > n.value*0.80) return collapseChain(ch[0]); }
+  return n;
+}
+function buildBottomUp(col) {
+  const leafAgg = {};
+  for (const [stack,count] of Object.entries(col)) {
+    const frames = stack.split(";");
+    const leaf = frames[frames.length-1];
+    const ci = categorizeSample(stack);
+    if (!leafAgg[leaf]) leafAgg[leaf] = {name:leaf, self:0, value:0, children:{}, cats:{}, _s:[]};
+    leafAgg[leaf].self += count; leafAgg[leaf].value += count;
+    if (ci >= 0) leafAgg[leaf].cats[ci] = (leafAgg[leaf].cats[ci]||0) + count;
+    if (frames.length>1) leafAgg[leaf]._s.push({c:frames.slice(0,-1).reverse(), n:count, ci});
+  }
+  function bc(stacks, depth) {
+    const byN = {};
+    for (const s of stacks) {
+      if (!s.c.length) continue;
+      const nm = s.c[0];
+      if (!byN[nm]) byN[nm] = {name:nm, self:0, value:0, children:{}, cats:{}, _s:[]};
+      byN[nm].self += s.n; byN[nm].value += s.n;
+      if (s.ci >= 0) byN[nm].cats[s.ci] = (byN[nm].cats[s.ci]||0) + s.n;
+      if (s.c.length>1) byN[nm]._s.push({c:s.c.slice(1), n:s.n, ci:s.ci});
+    }
+    if (depth<25) for (const n of Object.values(byN)) { if (n._s.length) n.children = bc(n._s, depth+1); delete n._s; }
+    return byN;
+  }
+  const root = {name:"(all)", value:0, self:0, children:{}, cats:{}};
+  for (const l of Object.values(leafAgg)) {
+    if (l._s.length) l.children = bc(l._s, 0); delete l._s;
+    root.children[l.name] = l; root.value += l.value;
+  }
+  return root;
+}
+function flattenTree(n, agg) {
+  agg = agg||{};
+  if (n.name!=='(all)') {
+    if (!agg[n.name]) agg[n.name] = {name:n.name, self:0, total:0};
+    agg[n.name].self += n.self||0; agg[n.name].total += n.value||0;
+  }
+  for (const c of Object.values(n.children||{})) flattenTree(c, agg);
+  return agg;
+}
+function findHotspot(n) {
+  let best=null;
+  function w(n) { if (n.name!=='(all)' && (n.self||0)>0 && (!best||n.self>best.self)) best=n; for (const c of Object.values(n.children||{})) w(c); }
+  w(n); return best;
+}
+function findNode(tree, name) {
+  if (tree.name===name) return tree;
+  for (const c of Object.values(tree.children||{})) { const f=findNode(c,name); if(f) return f; }
+  return null;
+}
+
+// === Init ===
+function init() {
+  const el = document.getElementById("title");
+  if (DATA.nickname) {
+    if (DATA.pr_number) el.innerHTML = `Spyglass <a href="https://github.com/sigp/lighthouse/pull/${DATA.pr_number}">${esc(DATA.nickname)}</a>`;
+    else el.textContent = `Spyglass — ${DATA.nickname}`;
+  }
+  buildTimeline();
+  buildCatBar();
+  refresh();
+}
+
+// === Timeline ===
+function buildYAxis() {
+  const el = document.getElementById("y-axis");
+  el.innerHTML = '';
+  const mx = DATA.max_samples;
+  [1.0, 0.75, 0.5, 0.25, 0].forEach(frac => {
+    const tick = document.createElement("div");
+    tick.textContent = fmtVal(Math.round(mx * frac), frac * 100);
+    el.appendChild(tick);
+  });
+}
+
+let brushDrag = null;
+function buildTimeline() {
+  buildYAxis();
+  const ch = document.getElementById("timeline-chart");
+  const mx = DATA.max_samples;
+
+  // Build stacked category bars
+  for (let i = 0; i < DATA.num_bins; i++) {
+    const bin = DATA.bins[i];
+    const bar = document.createElement("div");
+    bar.className = "bin-bar";
+    bar.style.height = (bin.total_samples / mx * 100) + "%";
+    DATA.category_names.forEach((cat, ci) => {
+      const pct = bin.categories[cat] || 0;
+      if (pct > 0) {
+        const seg = document.createElement("div");
+        seg.className = "bin-seg";
+        seg.dataset.cat = ci;
+        seg.style.height = pct + "%";
+        seg.style.background = DATA.category_colors[ci % DATA.category_colors.length];
+        bar.appendChild(seg);
+      }
+    });
+    ch.appendChild(bar);
+  }
+
+  // Epoch boundary marker
+  const marker = document.createElement("div");
+  marker.className = "epoch-line";
+  marker.style.left = (DATA.warmup / DATA.window * 100) + "%";
+  const label = document.createElement("div");
+  label.className = "epoch-label";
+  label.textContent = "epoch boundary";
+  marker.appendChild(label);
+  ch.appendChild(marker);
+
+  // Brush overlays (appended after bars so they render on top)
+  ch.insertAdjacentHTML('beforeend',
+    '<div class="brush-overlay" id="bl" style="display:none"></div>' +
+    '<div class="brush-overlay" id="br" style="display:none;right:0"></div>' +
+    '<div class="brush-window" id="bw" style="display:none">' +
+    '<div class="brush-handle brush-handle-l" id="bhl"></div>' +
+    '<div class="brush-handle brush-handle-r" id="bhr"></div>' +
+    '</div>');
+
+  ch.addEventListener('pointerdown', e => {
+    if (e.target.closest('#bw')) return;
+    startBrush(e, 'create');
+  });
+  document.getElementById("bhl").addEventListener('pointerdown', e => { e.stopPropagation(); startBrush(e,'resize-left'); });
+  document.getElementById("bhr").addEventListener('pointerdown', e => { e.stopPropagation(); startBrush(e,'resize-right'); });
+  document.getElementById("bw").addEventListener('pointerdown', e => {
+    if (e.target.closest('.brush-handle')) return;
+    e.stopPropagation(); startBrush(e,'move');
+  });
+
+  const ax = document.getElementById("timeline-axis");
+  for (let t=-DATA.warmup; t<=DATA.cooldown+0.01; t+=DATA.window/4) {
+    const sp = document.createElement("span");
+    sp.textContent = (t>=0?"+":"")+t.toFixed(1)+"s"; ax.appendChild(sp);
+  }
+  updateTimelineInfo();
+}
+function startBrush(e, mode) {
+  e.preventDefault();
+  const ch = document.getElementById("timeline-chart");
+  const rect = ch.getBoundingClientRect();
+  const pct = Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width));
+  const bin = Math.min(DATA.num_bins-1, Math.floor(pct*DATA.num_bins));
+  brushDrag = {mode, anchor:bin, orig:brushRange?[...brushRange]:null, moved:false};
+  if (mode==='create') brushRange=[bin,bin];
+  const onMove = ev => {
+    const p2 = Math.max(0,Math.min(1,(ev.clientX-rect.left)/rect.width));
+    const b2 = Math.min(DATA.num_bins-1, Math.floor(p2*DATA.num_bins));
+    if (brushDrag.mode==='create') {
+      if (b2 !== brushDrag.anchor) brushDrag.moved = true;
+      brushRange = [Math.min(brushDrag.anchor,b2), Math.max(brushDrag.anchor,b2)];
+    } else if (brushDrag.mode==='move' && brushDrag.orig) {
+      brushDrag.moved = true;
+      const w=brushDrag.orig[1]-brushDrag.orig[0], d=b2-brushDrag.anchor;
+      let lo=brushDrag.orig[0]+d, hi=lo+w;
+      if (lo<0){lo=0;hi=w;} if(hi>=DATA.num_bins){hi=DATA.num_bins-1;lo=hi-w;}
+      brushRange=[lo,hi];
+    } else if (brushDrag.mode==='resize-left' && brushDrag.orig) {
+      brushDrag.moved = true;
+      brushRange = [Math.min(b2, brushDrag.orig[1]), brushDrag.orig[1]];
+    } else if (brushDrag.mode==='resize-right' && brushDrag.orig) {
+      brushDrag.moved = true;
+      brushRange = [brushDrag.orig[0], Math.max(b2, brushDrag.orig[0])];
+    }
+    renderBrush(); refresh();
+  };
+  const onUp = () => {
+    if (!brushDrag.moved && brushRange && brushRange[0]===brushRange[1]) {
+      // Click without drag on a single bin — keep it selected if it's new, clear if re-clicked
+      if (brushDrag.orig && brushDrag.orig[0]===brushRange[0] && brushDrag.orig[1]===brushRange[1]) {
+        brushRange=null;
+      }
+      renderBrush(); refresh();
+    }
+    brushDrag=null;
+    document.removeEventListener('pointermove',onMove);
+    document.removeEventListener('pointerup',onUp);
+  };
+  document.addEventListener('pointermove',onMove);
+  document.addEventListener('pointerup',onUp);
+  renderBrush();
+}
+function renderBrush() {
+  const bl=document.getElementById("bl"), br=document.getElementById("br"), bw=document.getElementById("bw");
+  const badge = document.getElementById("brush-badge");
+  if (!brushRange) { bl.style.display=br.style.display=bw.style.display='none'; badge.style.display='none'; updateTimelineInfo(); return; }
+  const lo=(brushRange[0]/DATA.num_bins)*100, hi=((brushRange[1]+1)/DATA.num_bins)*100;
+  bl.style.display=''; bl.style.left='0'; bl.style.width=lo+'%';
+  br.style.display=''; br.style.left=hi+'%'; br.style.width=(100-hi)+'%';
+  bw.style.display=''; bw.style.left=lo+'%'; bw.style.width=(hi-lo)+'%';
+  badge.style.display=''; updateTimelineInfo();
+}
+function updateTimelineInfo() {
+  const el = document.getElementById("timeline-info");
+  if (brushRange) {
+    const ts=DATA.bins[brushRange[0]].t_start, te=DATA.bins[brushRange[1]].t_end;
+    el.innerHTML = `<span class="hl">${ts.toFixed(1)}s to ${te.toFixed(1)}s</span> <a href="#" class="clear-link" style="margin-left:8px" onclick="clearBrush();return false">clear</a>`;
+  } else el.textContent = `-${DATA.warmup}s to +${DATA.cooldown}s · drag to brush`;
+}
+function clearBrush() { brushRange=null; renderBrush(); refresh(); }
+
+// === Category bar ===
+function buildCatBar() {
+  document.getElementById("cat-bar").innerHTML = DATA.category_names.map((name,ci) =>
+    `<div class="cat-chip" data-ci="${ci}" onclick="toggleCat(${ci})"><div class="sw" style="background:${DATA.category_colors[ci]}"></div>${esc(name)}</div>`
+  ).join('');
+}
+function toggleCat(ci) {
+  if (activeCategories.has(ci)) activeCategories.delete(ci); else activeCategories.add(ci);
+  document.querySelectorAll('.cat-chip').forEach(el => {
+    const i=+el.dataset.ci;
+    el.classList.toggle('active',activeCategories.has(i));
+    el.classList.toggle('dimmed',activeCategories.size>0&&!activeCategories.has(i));
+  });
+  refresh();
+}
+
+function setView(m) {
+  viewMode=m; zoomNode=null;
+  document.getElementById("btn-topdown").classList.toggle('active',m==='top-down');
+  document.getElementById("btn-bottomup").classList.toggle('active',m==='bottom-up');
+  refresh();
+}
+function onSearch(v) { searchTerm=v.toLowerCase(); applySearch(); }
+function applySearch() {
+  document.querySelectorAll('.fg-frame').forEach(g => {
+    if (!searchTerm) { g.style.opacity=''; return; }
+    const nm = g.dataset.name||'';
+    g.style.opacity = nm.toLowerCase().includes(searchTerm) ? '1' : '0.15';
+  });
+}
+function applyTimelineHighlight() {
+  const segs = document.querySelectorAll('.bin-seg');
+  if (!activeCategories.size) { segs.forEach(s => { s.style.opacity = ''; }); return; }
+  segs.forEach(s => { s.style.opacity = activeCategories.has(+s.dataset.cat) ? '1' : '0.15'; });
+}
+function resetZoom() { zoomNode=null; refresh(); }
+function toggleCollapse() {
+  collapseEnabled = !collapseEnabled;
+  zoomNode = null;
+  document.getElementById("btn-collapse").textContent = collapseEnabled ? 'Show all frames' : 'Collapse frames';
+  refresh();
+}
+let playing = false, playInterval = null;
+function togglePlay() {
+  playing = !playing;
+  const btn = document.getElementById("play-btn");
+  btn.innerHTML = playing ? "&#9646;&#9646; Pause" : "&#9654; Play";
+  if (playing) {
+    const start = brushRange ? brushRange[0] : 0;
+    let cur = start;
+    brushRange = [cur, cur]; renderBrush(); refresh();
+    playInterval = setInterval(() => {
+      cur++;
+      if (cur >= DATA.num_bins) { togglePlay(); return; }
+      brushRange = [cur, cur]; renderBrush(); refresh();
+    }, 400);
+  } else {
+    clearInterval(playInterval); playInterval = null;
+  }
+}
+function toggleUnits() {
+  unitMode=(unitMode+1)%2;
+  document.getElementById("units-toggle").textContent = `show ${U_LABELS[(unitMode+1)%2]}`;
+  buildYAxis();
+  refresh();
+}
+function sortTable(col) {
+  if (tableSortBy===col) tableSortDir = tableSortDir==='desc'?'asc':'desc';
+  else { tableSortBy=col; tableSortDir='desc'; }
+  renderTable();
+}
+
+// === Core refresh ===
+function refresh() {
+  const bs = brushRange?brushRange[0]:0, be = brushRange?brushRange[1]:DATA.num_bins-1;
+  const col = mergeCollapsed(bs,be);
+  const tree = viewMode==='bottom-up' ? buildBottomUp(col) : buildTree(col);
+  currentTree = tree; currentTotal = tree.value;
+  const display = zoomNode || (viewMode==='top-down' && collapseEnabled ? collapseChain(tree) : tree);
+  renderStats(bs,be); renderCatLegend(bs,be); renderFG(display); renderTable(); renderDetail(); applySearch(); applyTimelineHighlight();
+  document.getElementById("play-btn").innerHTML = playing ? '&#9646;&#9646; Pause' : '&#9654; Play';
+  const st = document.getElementById("controls-status");
+  if (zoomNode) st.innerHTML = `Zoomed: <span class="hl">${esc(zoomNode.name)}</span> <a href="#" class="clear-link" style="margin-left:6px" onclick="resetZoom();return false">reset</a>`;
+  else if (viewMode==='bottom-up') st.textContent = 'Inverted — children show callers';
+  else st.textContent = '';
+  document.getElementById("fg-label").textContent = viewMode==='bottom-up' ? 'Inverted Flame Graph' : 'Flame Graph';
+}
+
+function renderStats(bs,be) {
+  let tot=0; for(let i=bs;i<=be;i++) tot+=DATA.bins[i].total_samples;
+  const fc = Object.keys(flattenTree(currentTree)).length;
+  const hot = findHotspot(currentTree);
+  const dur = ((be-bs+1)*DATA.bin_size).toFixed(1)+"s";
+  document.getElementById("stats-bar").innerHTML = [
+    {l:brushRange?'Brushed':'Window', v:dur},
+    {l:'Samples', v:fmtVal(tot,100)},
+    {l:'Functions', v:fc},
+    {l:'Top Hotspot', v:hot?hot.name:'—'},
+  ].map(s=>`<div class="stat"><div class="stat-label">${s.l}</div><div class="stat-value">${esc(String(s.v))}</div></div>`).join('');
+}
+
+function categorizeSample(stack) {
+  for (let ci = 0; ci < DATA.category_patterns.length; ci++) {
+    const cat = DATA.category_patterns[ci];
+    for (const p of cat.patterns) if (stack.includes(p)) return ci;
+    for (const rp of cat.regex_patterns) if (new RegExp(rp).test(stack)) return ci;
+  }
+  return -1;
+}
+
+function renderCatLegend(bs, be) {
+  const collapsed = mergeCollapsed(bs, be);
+  let total = 0;
+  const counts = new Array(DATA.category_names.length).fill(0);
+  for (const [stack, count] of Object.entries(collapsed)) {
+    total += count;
+    const ci = categorizeSample(stack);
+    if (ci >= 0) counts[ci] += count;
+    else counts[counts.length - 1] += count; // last = Uncategorized
+  }
+  const hasFilt = activeCategories.size > 0;
+  const entries = DATA.category_names.map((name, ci) => ({
+    name, ci, samples: counts[ci], pct: total ? 100 * counts[ci] / total : 0
+  })).sort((a, b) => b.samples - a.samples);
+  document.getElementById("cat-legend").innerHTML = entries
+    .map(e => {
+      const act = activeCategories.has(e.ci) ? ' active' : '';
+      const dim = hasFilt && !activeCategories.has(e.ci) ? ' dimmed' : '';
+      return `<div class="cat-legend-row${act}${dim}" onclick="toggleCat(${e.ci})">` +
+        `<div class="sw" style="background:${DATA.category_colors[e.ci]}"></div>` +
+        `<span class="cat-name">${esc(e.name)}</span>` +
+        `<span class="cat-val">${fmtVal(e.samples, e.pct)}</span></div>`;
+    }).join('');
+  document.getElementById("cat-clear-btn").style.display = hasFilt ? '' : 'none';
+}
+
+function clearCats() {
+  activeCategories.clear();
+  document.querySelectorAll('.cat-chip').forEach(el => {
+    el.classList.remove('active','dimmed');
+  });
+  refresh();
+}
+
+// === Flamegraph ===
+function renderFG(root) {
+  const c = document.getElementById("fg-container");
+  if (!root||root.value===0) { c.innerHTML='<div class="empty-msg">No samples in this range.</div>'; return; }
+  const W = c.clientWidth||900, H=20, rects=[], tv=root.value;
+  function lay(n,x,y,w) {
+    if(w<1.5) return;
+    rects.push({n,x,y,w});
+    let cx=x;
+    for(const ch of Object.values(n.children||{}).sort((a,b)=>b.value-a.value)) {
+      const cw=(ch.value/n.value)*w; lay(ch,cx,y+H,cw); cx+=cw;
+    }
+  }
+  lay(root,0,0,W);
+  const mY = rects.length ? Math.max(...rects.map(r=>r.y))+H : H;
+  const hasCatFilter = activeCategories.size>0;
+  c.innerHTML = `<svg width="${W}" height="${mY+4}" style="display:block">${rects.map(r=>{
+    const pct=(100*r.n.value/tv).toFixed(1), spct=(100*(r.n.self||0)/tv).toFixed(1);
+    const fc = frameCat(r.n.name);
+    const fill = fc === 'Uncategorized' ? `hsl(${hashColor(r.n.name)},45%,35%)` : catColor(fc);
+    const dim = hasCatFilter && !frameMatchesAnyCat(r.n.name) ? ' opacity="0.15"' : '';
+    const mc=Math.floor(r.w/6.5), lb=r.n.name.length<=mc?r.n.name:r.n.name.slice(0,mc-1)+'…';
+    const lbl = r.w>35 ? `<text class="fg-label" x="${r.x+3}" y="${r.y+14}">${esc(lb)}</text>` : '';
+    return `<g class="fg-frame"${dim} data-name="${esc(r.n.name)}"
+      onmouseenter="showTip(evt,this)" onmousemove="moveTip(evt)" onmouseleave="hideTip()"
+      onclick="onFGSelect(evt,'${esc(r.n.name)}')">
+      <rect x="${r.x}" y="${r.y}" width="${r.w}" height="${H-1}" rx="2" fill="${fill}" stroke="#0f172a" stroke-width="0.5"/>
+      ${lbl}</g>`;
+  }).join('')}</svg>`;
+}
+function showTip(e,g) {
+  const tip=document.getElementById("tooltip"), nm=g.dataset.name;
+  const n = findNode(zoomNode||currentTree, nm);
+  if (!n) return;
+  const tv=currentTotal, pct=(100*n.value/tv).toFixed(1), spct=(100*(n.self||0)/tv).toFixed(1);
+  const cat = frameCat(nm), cc = catColor(cat);
+  tip.innerHTML = `<div class="fn">${esc(nm)}</div><div class="metrics">Total: <span class="v">${fmtVal(n.value,+pct)}</span> (${pct}%) &nbsp; Self: <span class="v">${fmtVal(n.self||0,+spct)}</span> (${spct}%)</div><div style="margin-top:4px"><span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;background:${cc};color:#e2e8f0">${esc(cat)}</span></div>`;
+  tip.style.display=''; moveTip(e);
+}
+function moveTip(e) { const t=document.getElementById("tooltip"); t.style.left=(e.clientX+12)+'px'; t.style.top=(e.clientY+12)+'px'; }
+function hideTip() { document.getElementById("tooltip").style.display='none'; }
+let _lastClickName = null, _lastClickTime = 0;
+function onFGSelect(e,name) {
+  e.stopPropagation();
+  const now = Date.now();
+  if (name === _lastClickName && now - _lastClickTime < 400) {
+    // Double click — zoom
+    const n = findNode(zoomNode||currentTree, name);
+    if (n && Object.keys(n.children||{}).length>0) zoomNode=n;
+    selectedNode=n;
+    _lastClickName = null;
+    refresh();
+  } else {
+    // Single click — inspect
+    _lastClickName = name;
+    _lastClickTime = now;
+    selectedNode = findNode(zoomNode||currentTree, name);
+    renderDetail();
+  }
+}
+
+// === Function table ===
+function renderTable() {
+  const agg = flattenTree(currentTree);
+  let rows = Object.values(agg); const tv=currentTotal||1;
+  rows.sort((a,b)=>{
+    let av,bv;
+    if(tableSortBy==='name'){av=a.name;bv=b.name;}
+    else if(tableSortBy==='self'){av=a.self;bv=b.self;}
+    else if(tableSortBy==='total'){av=a.total;bv=b.total;}
+    else{av=a.total/tv;bv=b.total/tv;}
+    const c=typeof av==='string'?av.localeCompare(bv):av-bv;
+    return tableSortDir==='desc'?-c:c;
+  });
+  rows=rows.slice(0,50);
+  document.getElementById("func-tbody").innerHTML = rows.map(r=>{
+    const sp=100*r.self/tv, tp=100*r.total/tv, cat=frameCat(r.name), cc=catColor(cat);
+    return `<tr onclick="onRowClick('${esc(r.name)}')">
+      <td><div class="func-name"><div class="swatch" style="background:${cc}"></div><span class="name" title="${esc(r.name)}">${esc(r.name)}</span></div></td>
+      <td class="num self-val">${fmtVal(r.self,sp)}</td>
+      <td class="num total-val">${fmtVal(r.total,tp)}</td>
+      <td class="num"><div class="pct-bar"><div class="pct-bar-bg"><div class="pct-bar-fg" style="width:${Math.min(100,tp)}%"></div></div><span class="pct-bar-val">${tp.toFixed(1)}%</span></div></td>
+    </tr>`;
+  }).join('');
+  document.getElementById("table-label").textContent = `Functions (${Object.keys(agg).length})${brushRange?' — brushed range':''}`;
+}
+function onRowClick(name) {
+  document.getElementById("search-input").value=name;
+  searchTerm=name.toLowerCase();
+  selectedNode=findNode(currentTree,name);
+  renderDetail(); applySearch();
+}
+
+// === Detail panel ===
+function renderDetail() {
+  const el=document.getElementById("detail-content");
+  if (!selectedNode) {
+    el.innerHTML = '<span class="detail-empty">Click a frame to inspect.'+(viewMode==='bottom-up'?'<br>In bottom-up view, children show callers.':'')+'</span>';
+    return;
+  }
+  const n=selectedNode, tv=currentTotal||1;
+  const tp=(100*n.value/tv).toFixed(1), sp=(100*(n.self||0)/tv).toFixed(1);
+  const cat=frameCat(n.name), cc=catColor(cat);
+  let h = `<div class="detail-name">${esc(n.name)}</div>`;
+  h += `<div class="detail-grid">
+    <div class="detail-card"><div class="label">Total</div><div class="val total-val">${fmtVal(n.value,+tp)}</div><div class="sub">${tp}%</div></div>
+    <div class="detail-card"><div class="label">Self</div><div class="val self-val">${fmtVal(n.self||0,+sp)}</div><div class="sub">${sp}%</div></div>
+  </div>`;
+  h += `<span class="detail-cat-badge" style="background:${cc}">${esc(cat)}</span>`;
+  const ch=Object.values(n.children||{}).sort((a,b)=>b.value-a.value);
+  if (ch.length>0) {
+    const lbl = viewMode==='bottom-up' ? `Callers (${ch.length})` : `Callees (${ch.length})`;
+    h += `<div class="detail-callees"><div class="panel-label">${lbl}</div>`;
+    h += ch.slice(0,20).map(c=>{
+      const cp=(100*c.value/tv).toFixed(1);
+      return `<div class="callee-row" onclick="onRowClick('${esc(c.name)}')"><span class="callee-name">${esc(c.name)}</span><span class="callee-val">${fmtVal(c.value,+cp)}</span></div>`;
+    }).join('');
+    h += '</div>';
+  }
+  el.innerHTML = h;
+}
+
+init();
+</script>
+</body>
+</html>

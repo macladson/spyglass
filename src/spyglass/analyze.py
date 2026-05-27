@@ -228,7 +228,11 @@ def cmd_analyze(
             print("ERROR: --filter is required for CPU profiles.", file=sys.stderr)
             print(f"  Try: spyglass analyze {profile_dir} --filter epoch-boundary", file=sys.stderr)
             sys.exit(1)
-        _analyze_cpu(config, profile_dir, perf_data, filter_mode, units=units)
+        if filter_mode == "all":
+            for fm in ["epoch-boundary", "mid-epoch", "steady-state"]:
+                _analyze_cpu(config, profile_dir, perf_data, fm, units=units, skip_on_missing=True)
+        else:
+            _analyze_cpu(config, profile_dir, perf_data, filter_mode, units=units)
     elif heap_files:
         _analyze_memory(config, profile_dir, heap_files)
     else:
@@ -237,7 +241,12 @@ def cmd_analyze(
 
 
 def _analyze_cpu(
-    config: SpyglassConfig, profile_dir: Path, perf_data: Path, filter_mode: str, units: str = "cycles"
+    config: SpyglassConfig,
+    profile_dir: Path,
+    perf_data: Path,
+    filter_mode: str,
+    units: str = "cycles",
+    skip_on_missing: bool = False,
 ):
     """CPU profile analysis pipeline."""
     print(f"{BOLD}=== Analyze (CPU) ==={RESET}")
@@ -251,32 +260,29 @@ def _analyze_cpu(
     else:
         print(f"  Using existing {collapsed_full.name}")
 
-    # Step 2: Apply time-based filtering if needed
-    if filter_mode == "all":
-        collapsed_path = collapsed_full
-        view_dir = profile_dir / "views" / "all"
-        view_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        warmup = config.filtering.epoch_boundary_warmup
-        cooldown = config.filtering.epoch_boundary_cooldown
-        time_ranges = compute_time_ranges(profile_dir, filter_mode, warmup, cooldown)
+    # Step 2: Apply time-based filtering
+    warmup = config.filtering.epoch_boundary_warmup
+    cooldown = config.filtering.epoch_boundary_cooldown
+    time_ranges = compute_time_ranges(profile_dir, filter_mode, warmup, cooldown)
 
-        if time_ranges is None:
-            print(f"ERROR: No data available for '{filter_mode}' filter.", file=sys.stderr)
-            print(
-                "  This usually means no epoch boundaries were recorded during the run.",
-                file=sys.stderr,
-            )
-            print(f"  Try: spyglass analyze {profile_dir} --filter all", file=sys.stderr)
-            sys.exit(1)
-        else:
-            view_dir = profile_dir / "views" / filter_mode.replace("-", "_")
-            view_dir.mkdir(parents=True, exist_ok=True)
-            collapsed_path = view_dir / "profile.collapsed"
-            print(f"  Filtering to {filter_mode} time ranges...")
-            filter_collapsed_stacks(collapsed_full, collapsed_path, time_ranges, perf_data)
-            size_kb = collapsed_path.stat().st_size / 1024
-            print(f"    -> {collapsed_path.name} ({size_kb:.0f} KB)")
+    if time_ranges is None:
+        if skip_on_missing:
+            print(f"  Skipping {filter_mode} (no epoch data available)\n")
+            return
+        print(f"ERROR: No data available for '{filter_mode}' filter.", file=sys.stderr)
+        print(
+            "  This usually means no epoch boundaries were recorded during the run.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    view_dir = profile_dir / "views" / filter_mode.replace("-", "_")
+    view_dir.mkdir(parents=True, exist_ok=True)
+    collapsed_path = view_dir / "profile.collapsed"
+    print(f"  Filtering to {filter_mode} time ranges...")
+    filter_collapsed_stacks(collapsed_full, collapsed_path, time_ranges, perf_data)
+    size_kb = collapsed_path.stat().st_size / 1024
+    print(f"    -> {collapsed_path.name} ({size_kb:.0f} KB)")
 
     # Step 3: Analysis markdown
     print("  Analyzing stacks...")
@@ -284,7 +290,7 @@ def _analyze_cpu(
 
     # Step 4: Category breakdown (if categories.toml exists)
     category_report = None
-    categories = load_categories()
+    categories = load_categories(config.config_dir / "categories.toml")
     if categories:
         print("  Categorizing samples...")
         cat_result = categorize_collapsed(collapsed_path, categories)

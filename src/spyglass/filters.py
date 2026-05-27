@@ -249,7 +249,7 @@ def get_first_perf_timestamp(perf_data_path: Path, env: dict) -> float | None:
     proc = subprocess.Popen(
         ["perf", "script", "--no-inline", "-i", str(perf_data_path)],
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         env=env,
     )
     for raw_line in proc.stdout:

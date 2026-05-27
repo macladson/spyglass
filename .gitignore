@@ -24,3 +24,11 @@ my_config.toml
 *.swp
 *.swo
 *~
+
+# Build artifacts
+.ruff_cache
+.claude
+
+# LLM
+.claude
+.codex

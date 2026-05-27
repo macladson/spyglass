@@ -14,13 +14,12 @@ def cmd_build(config: SpyglassConfig, mode: str, verbose: bool = False):
 
     For CPU mode: builds with frame pointers enabled.
     For memory mode: builds with the release-profiling profile and jemalloc-profiling feature.
-    For both: combines the above.
 
     No file modifications are needed — everything is controlled via env vars and feature flags.
 
     Args:
         config: Spyglass configuration object
-        mode: "cpu", "memory", or "both"
+        mode: "cpu" or "memory"
         verbose: Show build output
     """
     lighthouse_dir = config.paths.lighthouse_dir
@@ -53,20 +52,20 @@ def cmd_build(config: SpyglassConfig, mode: str, verbose: bool = False):
     features = []
     if do_disable_backfill:
         features.append("network/disable-backfill")
-    if mode in ("memory", "both"):
+    if mode == "memory":
         features.append("malloc_utils/jemalloc-profiling")
     if features:
         build_cmd.extend(["--features", ",".join(features)])
 
     # Environment
     env = os.environ.copy()
-    if mode in ("cpu", "both"):
+    if mode == "cpu":
         existing = env.get("RUSTFLAGS", "")
         flag = "-C force-frame-pointers=yes"
         if flag not in existing:
             env["RUSTFLAGS"] = f"{existing} {flag}".strip()
 
-    if mode in ("memory", "both"):
+    if mode == "memory":
         # Override jemalloc config at compile time to enable profiling support
         env["JEMALLOC_SYS_WITH_MALLOC_CONF"] = "abort_conf:true,narenas:16,prof:true"
 
@@ -162,17 +161,32 @@ def _run_build_with_pty(build_cmd: list, cwd: Path, env: dict):
                     if line.strip():
                         output_lines.append(line)
             elif proc.poll() is not None:
-                # Drain remaining
-                try:
-                    remaining = os.read(master_fd, 4096)
-                    if remaining:
-                        decoded = remaining.decode("utf-8", errors="replace")
-                        plain = ansi_re.sub("", decoded)
-                        if "Finished" in plain:
-                            sys.stdout.write(f"\r{decoded}\033[K")
-                            sys.stdout.flush()
-                except OSError:
-                    pass
+                # Drain remaining output
+                while True:
+                    try:
+                        remaining = os.read(master_fd, 4096)
+                        if not remaining:
+                            break
+                        buf += remaining
+                    except OSError:
+                        break
+                while b"\r" in buf or b"\n" in buf:
+                    r_pos = buf.find(b"\r")
+                    n_pos = buf.find(b"\n")
+                    if r_pos == -1:
+                        pos = n_pos
+                    elif n_pos == -1:
+                        pos = r_pos
+                    else:
+                        pos = min(r_pos, n_pos)
+                    line = buf[:pos].decode("utf-8", errors="replace")
+                    buf = buf[pos + 1 :]
+                    plain = ansi_re.sub("", line)
+                    if "Building [" in plain or "Finished" in plain:
+                        sys.stdout.write(f"\r{line}\033[K")
+                        sys.stdout.flush()
+                    if line.strip():
+                        output_lines.append(line)
                 break
     finally:
         os.close(master_fd)

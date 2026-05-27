@@ -19,7 +19,7 @@ def _run_git(
     if result.returncode != 0:
         print(f"ERROR: {error_msg}", file=sys.stderr)
         if not verbose and result.stderr:
-            print(result.stderr.decode(), file=sys.stderr)
+            print(result.stderr.decode(errors="replace"), file=sys.stderr)
         sys.exit(1)
     return result
 
@@ -45,19 +45,19 @@ def fetch_pr(config, pr_number: int, verbose: bool = False) -> Path:
     print(f"=== Fetch PR #{pr_number} ===")
 
     if checkout_path.exists():
-        # Already cloned — fetch latest and reset
+        # Already cloned — fetch latest into the named branch and checkout
         print(f"  Updating existing checkout at {checkout_path}...")
         _run_git(
-            ["git", "fetch", "origin", f"pull/{pr_number}/head"],
+            ["git", "fetch", "origin", f"pull/{pr_number}/head:pr-{pr_number}", "--force"],
             cwd=checkout_path,
             verbose=verbose,
             error_msg=f"Failed to fetch PR #{pr_number}",
         )
         _run_git(
-            ["git", "reset", "--hard", "FETCH_HEAD"],
+            ["git", "checkout", f"pr-{pr_number}"],
             cwd=checkout_path,
             verbose=verbose,
-            error_msg=f"Failed to reset to PR #{pr_number}",
+            error_msg=f"Failed to checkout pr-{pr_number}",
         )
     else:
         # Fresh clone — shallow single-branch clone, then fetch just this PR
