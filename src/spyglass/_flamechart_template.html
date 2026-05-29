@@ -47,9 +47,10 @@ body { font-family: ui-monospace, "SF Mono", Menlo, monospace; background: #0f17
 /* Controls bar */
 .controls-bar { padding: 8px 24px; border-bottom: 1px solid #1e293b; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: #0f172a; }
 .search-box { position: relative; flex: 1; max-width: 320px; min-width: 160px; }
-.search-box input { width: 100%; background: #1e293b; border: 1px solid #334155; border-radius: 4px; padding: 5px 8px 5px 28px; font-size: 11px; color: #e2e8f0; outline: none; font-family: inherit; }
+.search-box input { width: 100%; background: #1e293b; border: 1px solid #334155; border-radius: 4px; padding: 5px 26px 5px 28px; font-size: 11px; color: #e2e8f0; outline: none; font-family: inherit; }
 .search-box input:focus { border-color: #f97316; }
 .search-box svg { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: #64748b; }
+.search-box .search-clear { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); font-size: 15px; line-height: 1; }
 .btn-group { display: flex; border: 1px solid #334155; border-radius: 4px; overflow: hidden; }
 .btn-group button { padding: 5px 12px; font-size: 11px; border: none; cursor: pointer; font-family: inherit; transition: all 0.1s; }
 .btn-group button.active { background: #f97316; color: #fff; }
@@ -159,6 +160,7 @@ body { font-family: ui-monospace, "SF Mono", Menlo, monospace; background: #0f17
   <div class="search-box">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
     <input id="search-input" placeholder="Search functions..." oninput="onSearch(this.value)">
+    <a href="#" class="clear-link search-clear" id="search-clear" style="display:none" onclick="clearSearch();return false">&times;</a>
   </div>
   <button class="btn" id="play-btn" onclick="togglePlay()">&#9654; Play</button>
   <div class="btn-group">
@@ -512,7 +514,8 @@ function setView(m) {
   document.getElementById("btn-bottomup").classList.toggle('active',m==='bottom-up');
   refresh();
 }
-function onSearch(v) { searchTerm=v.toLowerCase(); applySearch(); }
+function onSearch(v) { searchTerm=v.toLowerCase(); document.getElementById("search-clear").style.display = v ? '' : 'none'; applySearch(); }
+function clearSearch() { const el=document.getElementById("search-input"); el.value=''; el.focus(); onSearch(''); }
 function applySearch() {
   document.querySelectorAll('.fg-frame').forEach(g => {
     if (!searchTerm) { g.style.opacity=''; return; }
@@ -720,6 +723,7 @@ function renderTable() {
 }
 function onRowClick(name) {
   document.getElementById("search-input").value=name;
+  document.getElementById("search-clear").style.display = name ? '' : 'none';
   searchTerm=name.toLowerCase();
   selectedNode=findNode(currentTree,name);
   renderDetail(); applySearch();
