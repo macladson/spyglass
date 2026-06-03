@@ -304,8 +304,8 @@ def _generate_html(
         bins_json.append(
             {
                 "index": i,
-                "t_start": round(t_start, 2),
-                "t_end": round(t_end, 2),
+                "t_start": round(t_start, 6),
+                "t_end": round(t_end, 6),
                 "total_samples": total,
                 "top_functions": top_funcs,
                 "categories": cat_breakdown,

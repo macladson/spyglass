@@ -240,6 +240,7 @@ function fmtSec(n) {
   if (n >= 0.001) return (n*1000).toFixed(0)+"ms";
   return "0s";
 }
+function fmtTime(n) { return (Math.round(n*1e6)/1e6).toString(); }
 function fmtVal(samples, pct) {
   if (unitMode===U_SEC && DATA.perf_frequency) return fmtSec(samples/DATA.perf_frequency);
   if (unitMode===U_PCT) return (pct||0).toFixed(1)+"%";
@@ -498,7 +499,7 @@ function updateTimelineInfo() {
   const el = document.getElementById("timeline-info");
   if (brushRange) {
     const ts=DATA.bins[brushRange[0]].t_start, te=DATA.bins[brushRange[1]].t_end;
-    el.innerHTML = `<span class="hl">${ts.toFixed(1)}s to ${te.toFixed(1)}s</span> <a href="#" class="clear-link" style="margin-left:8px" onclick="clearBrush();return false">clear</a>`;
+    el.innerHTML = `<span class="hl">${fmtTime(ts)}s to ${fmtTime(te)}s</span> <a href="#" class="clear-link" style="margin-left:8px" onclick="clearBrush();return false">clear</a>`;
   } else el.textContent = `-${DATA.warmup}s to +${DATA.cooldown}s · drag to brush`;
 }
 function clearBrush() { brushRange=null; zoomNode=null; renderBrush(); refresh(); }
@@ -586,7 +587,7 @@ function renderStats(bs,be) {
   let tot=0; for(let i=bs;i<=be;i++) tot+=DATA.bins[i].total_samples;
   const fc = Object.keys(flattenTree(currentTree)).length;
   const hot = findHotspot(currentTree);
-  const dur = ((be-bs+1)*DATA.bin_size).toFixed(1)+"s";
+  const dur = fmtTime((be-bs+1)*DATA.bin_size)+"s";
   document.getElementById("stats-bar").innerHTML = [
     {l:brushRange?'Brushed':'Window', v:dur},
     {l:'Samples', v:fmtVal(tot,100)},
