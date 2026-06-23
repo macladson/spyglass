@@ -4,6 +4,10 @@ A Python CLI tool for CPU and memory profiling of [Lighthouse](https://github.co
 
 _WARNING: This tool is a work-in-progress. There will be bugs_
 
+## Screenshot
+
+![Screenshot of Flamechart](./spyglass.png)
+
 ## Features
 
 - **CPU profiling:** via `perf record` with automatic flamegraph generation
