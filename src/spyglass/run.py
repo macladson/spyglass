@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import secrets
+import shlex
 import shutil
 import signal
 import socket
@@ -367,7 +368,11 @@ def cmd_run(
                 "--metrics-port",
                 str(metrics_port),
             ]
-            bn_args.extend(flags)
+            # Split each flag so an entry like "--foo bar" (flag and value in one list element)
+            # is forwarded as separate argv tokens. shlex.split also handles quoting, e.g.
+            # '--graffiti "hello world"'.
+            for flag in flags:
+                bn_args.extend(shlex.split(flag))
 
             env = os.environ.copy()
             if mode == "memory":
