@@ -36,6 +36,14 @@ body { font-family: ui-monospace, "SF Mono", Menlo, monospace; background: #0f17
 .bin-seg { width: 100%; }
 .epoch-line { position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(255,255,255,0.15); z-index: 2; pointer-events: none; }
 .epoch-label { position: absolute; top: -18px; left: 4px; font-size: 9px; color: #475569; white-space: nowrap; pointer-events: none; letter-spacing: 0.04em; }
+.block-marker { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1.5px dashed #22d3ee; z-index: 2; pointer-events: none; }
+.block-marker.head { border-left: 2px solid #4ade80; }
+.block-tab { position: absolute; top: 0; left: -5px; width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 7px solid #22d3ee; pointer-events: none; }
+.block-tab.head { border-top-color: #4ade80; }
+.block-hit { position: absolute; top: 0; bottom: 0; left: -5px; width: 11px; pointer-events: auto; cursor: pointer; }
+.block-hit:hover ~ .block-tab { filter: brightness(1.4); }
+.block-span { position: absolute; top: 0; bottom: 0; background: rgba(74,222,128,0.07); z-index: 1; pointer-events: none; }
+.block-proc { position: absolute; top: -14px; transform: translateX(-50%); font-size: 8px; color: #4ade80; white-space: nowrap; background: rgba(15,23,42,0.82); padding: 0 3px; border-radius: 2px; pointer-events: auto; cursor: pointer; letter-spacing: 0.03em; }
 .timeline-axis { display: flex; justify-content: space-between; font-size: 10px; color: #475569; margin-top: 4px; }
 .brush-overlay { position: absolute; top: 0; bottom: 0; background: rgba(15,23,42,0.7); pointer-events: none; }
 .brush-window { position: absolute; top: 0; bottom: 0; border-left: 2px solid #f97316; border-right: 2px solid #f97316; background: rgba(249,115,22,0.03); cursor: grab; }
@@ -208,7 +216,7 @@ body { font-family: ui-monospace, "SF Mono", Menlo, monospace; background: #0f17
   </table>
 </div>
 
-<div class="footer">Drag on timeline to brush · Click frame to zoom · Toggle bottom-up for hot leaf functions</div>
+<div class="footer">Drag on timeline to brush · Click frame to zoom · Toggle bottom-up for hot leaf functions · <span style="color:#22d3ee">▼</span> block arrival <span style="color:#4ade80">▲</span> set as head (span = processing time)</div>
 
 <script>
 const DATA = /*DATA_PLACEHOLDER*/;
@@ -376,6 +384,23 @@ function buildYAxis() {
   });
 }
 
+function addBlockLine(ch, xPct, isHead, i) {
+  const m = document.createElement("div");
+  m.className = "block-marker" + (isHead ? " head" : "");
+  m.style.left = xPct + "%";
+  // Full-height transparent hover target (the line itself is too thin to hover).
+  const hit = document.createElement("div");
+  hit.className = "block-hit";
+  hit.addEventListener("mouseenter", e => showBlockTip(e, i));
+  hit.addEventListener("mousemove", moveTip);
+  hit.addEventListener("mouseleave", hideTip);
+  m.appendChild(hit);
+  const tab = document.createElement("div");
+  tab.className = "block-tab" + (isHead ? " head" : "");
+  m.appendChild(tab);
+  ch.appendChild(m);
+}
+
 let brushDrag = null;
 function buildTimeline() {
   buildYAxis();
@@ -411,6 +436,31 @@ function buildTimeline() {
   label.textContent = "epoch boundary";
   marker.appendChild(label);
   ch.appendChild(marker);
+
+  // Block markers (inferred from perf): ▼ arrival (gossip verification),
+  // ▲ head-set (fork choice), and the shaded span between = processing time.
+  (DATA.block_markers || []).forEach((bm, i) => {
+    const toX = o => (o + DATA.warmup) / DATA.window * 100;
+    const xa = bm.arrival !== undefined ? toX(bm.arrival) : null;
+    const xh = bm.head !== undefined ? toX(bm.head) : null;
+    if (xa !== null && xh !== null && xh > xa) {
+      const span = document.createElement("div");
+      span.className = "block-span";
+      span.style.left = xa + "%";
+      span.style.width = (xh - xa) + "%";
+      const pl = document.createElement("div");
+      pl.className = "block-proc";
+      pl.style.left = "50%";
+      pl.textContent = fmtSec(bm.process_time || (bm.head - bm.arrival));
+      pl.addEventListener("mouseenter", e => showBlockTip(e, i));
+      pl.addEventListener("mousemove", moveTip);
+      pl.addEventListener("mouseleave", hideTip);
+      span.appendChild(pl);
+      ch.appendChild(span);
+    }
+    if (xa !== null && xa >= 0 && xa <= 100) addBlockLine(ch, xa, false, i);
+    if (xh !== null && xh >= 0 && xh <= 100) addBlockLine(ch, xh, true, i);
+  });
 
   // Brush overlays (appended after bars so they render on top)
   ch.insertAdjacentHTML('beforeend',
@@ -677,6 +727,33 @@ function showTip(e,g) {
 }
 function moveTip(e) { const t=document.getElementById("tooltip"); t.style.left=(e.clientX+12)+'px'; t.style.top=(e.clientY+12)+'px'; }
 function hideTip() { document.getElementById("tooltip").style.display='none'; }
+function showBlockTip(e, i) {
+  const bm = DATA.block_markers[i]; if (!bm) return;
+  const tip = document.getElementById("tooltip");
+  const off = o => (o>=0?'+':'') + o.toFixed(3) + 's';
+  let title, rows = [];
+  if (bm.arrival !== undefined && bm.head !== undefined) {
+    title = '▼▲ Block processed';
+    rows.push(`Arrived <span class="v">${off(bm.arrival)}</span> → head <span class="v">${off(bm.head)}</span>`);
+    rows.push(`Processing time: <span class="v">${fmtSec(bm.process_time)}</span>`);
+  } else if (bm.arrival !== undefined) {
+    title = '▼ Block arrived';
+    rows.push(`<span class="v">${off(bm.arrival)}</span> from epoch boundary`);
+    rows.push(`Not set as head (duplicate / lost fork choice?)`);
+  } else {
+    title = '▲ Set as head';
+    rows.push(`<span class="v">${off(bm.head)}</span> from epoch boundary`);
+    rows.push(`Arrival not captured in samples`);
+  }
+  let sub = `${bm.samples} sample${bm.samples===1?'':'s'}`;
+  if (bm.slot !== undefined) sub = `slot ${bm.slot} · +${bm.slot_offset.toFixed(2)}s into slot · ` + sub;
+  if (bm.head_changed) sub = '✓ became canonical head · ' + sub;
+  const ep = DATA.epochs && DATA.epochs.length>1 ? ` (epoch ${bm.epoch})` : '';
+  tip.innerHTML = `<div class="fn">${title}${ep}</div>`+
+    rows.map(r=>`<div class="metrics">${r}</div>`).join('')+
+    `<div style="margin-top:4px;color:#94a3b8">${esc(sub)}</div>`;
+  tip.style.display=''; moveTip(e);
+}
 let _lastClickName = null, _lastClickTime = 0;
 function onFGSelect(e,name) {
   e.stopPropagation();
